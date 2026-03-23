@@ -426,13 +426,18 @@ elif page == "📖  My Recipes":
                     if tags:
                         st.markdown(render_tag_badges(tags), unsafe_allow_html=True)
 
-                    with st.expander("🏷️ Edit tags", expanded=False):
+                    # Use a toggle instead of a nested expander — nested expanders
+                    # break text-cell editing in st.data_editor on the same page.
+                    show_tag_editor = st.toggle(
+                        "🏷️ Edit tags", key=f"tag_toggle_{recipe_id}", value=False
+                    )
+                    if show_tag_editor:
                         new_tags_val = st.text_input(
                             "Tags (comma-separated)",
                             value=tags,
                             placeholder="chicken, weeknight, slow-cooker",
                             key=f"tags_input_{recipe_id}",
-                            help="Separate tags with commas. These appear as coloured badges and can be used to filter recipes.",
+                            help="Separate tags with commas. They appear as coloured badges and can be used to filter recipes.",
                         )
                         if st.button("💾 Save tags", key=f"save_tags_{recipe_id}"):
                             with st.spinner("Saving…"):
