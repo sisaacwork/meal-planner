@@ -8,7 +8,10 @@ import pandas as pd
 from collections import defaultdict
 from datetime import date
 
-import config
+try:
+    import config  # exists locally; not present on Streamlit Cloud (uses st.secrets instead)
+except ModuleNotFoundError:
+    config = None  # type: ignore
 from sheets_client import get_client, get_spreadsheet
 from recipe_ingester import ingest_recipe, ingest_manual
 from meal_optimizer import (
@@ -36,30 +39,26 @@ st.markdown("""
 
 # ── Config helpers (works locally AND on Streamlit Cloud) ─────────────────────
 def get_spreadsheet_id():
-    try:
-        import streamlit as st
-        if "SPREADSHEET_ID" in st.secrets:
-            return st.secrets["SPREADSHEET_ID"]
-    except Exception:
-        pass
-    return config.SPREADSHEET_ID
+    if "SPREADSHEET_ID" in st.secrets:
+        return st.secrets["SPREADSHEET_ID"]
+    return config.SPREADSHEET_ID if config else ""
 
 
 def get_postal_code():
-    try:
-        import streamlit as st
-        if "POSTAL_CODE" in st.secrets:
-            return st.secrets["POSTAL_CODE"]
-    except Exception:
-        pass
-    return getattr(config, "POSTAL_CODE", "M5V3A8")
+    if "POSTAL_CODE" in st.secrets:
+        return st.secrets["POSTAL_CODE"]
+    return getattr(config, "POSTAL_CODE", "M5V3A8") if config else "M5V3A8"
+
+
+def get_credentials_path():
+    return getattr(config, "CREDENTIALS_PATH", "credentials.json") if config else "credentials.json"
 
 
 # ── Google Sheets connection ──────────────────────────────────────────────────
 @st.cache_resource(show_spinner="Connecting to Google Sheets…")
 def get_sheets_connection():
     try:
-        gc = get_client(config.CREDENTIALS_PATH)
+        gc = get_client(get_credentials_path())
         ss = get_spreadsheet(gc, get_spreadsheet_id())
         return ss
     except Exception:
@@ -125,7 +124,7 @@ if page == "➕  Add Recipe":
                         recipe, ingredients = ingest_recipe(
                             url_input.strip(),
                             get_spreadsheet_id(),
-                            config.CREDENTIALS_PATH,
+                            get_credentials_path(),
                         )
                         load_all_data.clear()
                         st.success(f"✅ **{recipe['name']}** saved! ({len(ingredients)} ingredients)")
@@ -174,7 +173,7 @@ if page == "➕  Add Recipe":
                             servings=servings,
                             cuisine=cuisine,
                             tags=tags,
-                            credentials_path=config.CREDENTIALS_PATH,
+                            credentials_path=get_credentials_path(),
                         )
                         load_all_data.clear()
                         st.success(f"✅ **{recipe['name']}** saved! ({len(ingredients)} ingredients)")
