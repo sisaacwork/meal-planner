@@ -77,6 +77,25 @@ def get_ss():
     return ss
 
 
+def save_recipe_tags(ss, recipe_id: str, new_tags: str):
+    """Update the tags cell for one recipe in the Recipes sheet."""
+    ws         = ss.worksheet("Recipes")
+    all_values = ws.get_all_values()
+    if not all_values:
+        raise ValueError("Recipes sheet is empty.")
+    header = [h.lower().strip() for h in all_values[0]]
+    try:
+        id_col   = header.index("recipe_id") + 1   # gspread is 1-indexed
+        tags_col = header.index("tags") + 1
+    except ValueError as exc:
+        raise ValueError(f"Column not found in Recipes sheet: {exc}") from exc
+    for row_num, row in enumerate(all_values[1:], start=2):
+        if row and str(row[id_col - 1]).strip() == str(recipe_id).strip():
+            ws.update_cell(row_num, tags_col, new_tags.strip())
+            return
+    raise ValueError(f"Recipe ID '{recipe_id}' not found.")
+
+
 def save_ingredient_edits(ss, recipe_id: str, edited_df: pd.DataFrame):
     """
     Replace all ingredient rows for a recipe in Google Sheets with the edited version.
@@ -403,8 +422,27 @@ elif page == "📖  My Recipes":
                     if url:
                         c3.markdown(f"[View original recipe ↗]({url})")
 
+                    # ── Tags (display + inline editor) ───────────────────────
                     if tags:
                         st.markdown(render_tag_badges(tags), unsafe_allow_html=True)
+
+                    with st.expander("🏷️ Edit tags", expanded=False):
+                        new_tags_val = st.text_input(
+                            "Tags (comma-separated)",
+                            value=tags,
+                            placeholder="chicken, weeknight, slow-cooker",
+                            key=f"tags_input_{recipe_id}",
+                            help="Separate tags with commas. These appear as coloured badges and can be used to filter recipes.",
+                        )
+                        if st.button("💾 Save tags", key=f"save_tags_{recipe_id}"):
+                            with st.spinner("Saving…"):
+                                try:
+                                    save_recipe_tags(get_ss(), recipe_id, new_tags_val)
+                                    load_all_data.clear()
+                                    st.success("✅ Tags updated!")
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"Could not save tags: {e}")
 
                     # ── Rating buttons ────────────────────────────────────────
                     current_rating = ratings_map.get(recipe_id, "none")
