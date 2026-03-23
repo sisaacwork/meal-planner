@@ -192,42 +192,90 @@ elif page == "📖  My Recipes":
 
     recipes_df, ing_df, _ = load_all_data()
 
+    # Filter out blank / accidental test rows (name empty or only symbols)
+    if not recipes_df.empty and "name" in recipes_df.columns:
+        recipes_df = recipes_df[
+            recipes_df["name"].astype(str).str.strip().str.len() >= 2
+        ]
+        recipes_df = recipes_df[
+            ~recipes_df["name"].astype(str).str.strip().str.match(r"^[\*_\-\s]+$")
+        ]
+
+    def render_tag_badges(tags_str: str) -> str:
+        """Turn a comma-separated tag string into coloured HTML badge chips."""
+        if not tags_str or not str(tags_str).strip():
+            return ""
+        tags = [t.strip() for t in str(tags_str).split(",") if t.strip()]
+        badge = (
+            '<span style="background:#e8f5e9;color:#2e7d32;padding:2px 10px;'
+            'border-radius:12px;font-size:12px;margin-right:4px;'
+            'display:inline-block;margin-bottom:4px;">{}</span>'
+        )
+        return " ".join(badge.format(t) for t in tags)
+
     if recipes_df.empty:
         st.info("No recipes yet. Head to **Add Recipe** to get started!")
     else:
         st.metric("Recipes saved", len(recipes_df))
         st.markdown("---")
 
-        search = st.text_input("🔍 Search recipes", placeholder="chicken, soup, pasta…")
+        # Collect all unique tags across every recipe for the filter
+        all_tags = sorted({
+            tag.strip()
+            for raw in recipes_df.get("tags", pd.Series(dtype=str)).fillna("")
+            for tag in str(raw).split(",")
+            if tag.strip()
+        })
+
+        col_search, col_tags = st.columns([2, 3])
+        with col_search:
+            search = st.text_input("🔍 Search by name", placeholder="chicken, soup…")
+        with col_tags:
+            selected_tags = st.multiselect(
+                "🏷️ Filter by tag",
+                options=all_tags,
+                placeholder="Select tags…",
+            )
+
+        display_df = recipes_df.copy()
+
         if search:
-            mask = recipes_df.apply(
+            mask = display_df.apply(
                 lambda row: search.lower() in str(row.get("name", "")).lower()
-                or search.lower() in str(row.get("tags", "")).lower()
                 or search.lower() in str(row.get("cuisine", "")).lower(),
                 axis=1,
             )
-            display_df = recipes_df[mask]
-        else:
-            display_df = recipes_df
+            display_df = display_df[mask]
+
+        if selected_tags:
+            def has_all_tags(row):
+                row_tags = [t.strip().lower() for t in str(row.get("tags", "")).split(",")]
+                return all(t.lower() in row_tags for t in selected_tags)
+            display_df = display_df[display_df.apply(has_all_tags, axis=1)]
 
         if display_df.empty:
-            st.warning("No recipes match that search.")
+            st.warning("No recipes match those filters.")
         else:
             for _, row in display_df.iterrows():
                 recipe_id = str(row.get("recipe_id", ""))
-                name      = row.get("name", "Unknown")
+                name      = str(row.get("name", "Unknown")).strip()
                 url       = row.get("url", "")
                 servings  = row.get("servings", "")
-                cuisine   = row.get("cuisine", "")
-                tags      = row.get("tags", "")
+                cuisine   = str(row.get("cuisine", "")).strip()
+                tags      = str(row.get("tags", "")).strip()
                 added     = row.get("date_added", "")
 
-                with st.expander(f"**{name}**  —  {cuisine}  {('🏷️ ' + tags) if tags else ''}"):
+                # Expander title: name + cuisine only (tags shown as badges inside)
+                title = f"**{name}**" + (f"  —  {cuisine}" if cuisine else "")
+                with st.expander(title):
                     c1, c2, c3 = st.columns(3)
                     c1.markdown(f"**Servings:** {servings}")
                     c2.markdown(f"**Added:** {added}")
                     if url:
                         c3.markdown(f"[View original recipe ↗]({url})")
+
+                    if tags:
+                        st.markdown(render_tag_badges(tags), unsafe_allow_html=True)
 
                     recipe_ings = ing_df[ing_df["recipe_id"].astype(str) == recipe_id]
                     if not recipe_ings.empty:
@@ -323,6 +371,7 @@ elif page == "📅  Generate Meal Plan":
 # ══════════════════════════════════════════════════════════════════════════════
 elif page == "🛒  Shopping List":
     st.header("🛒 Shopping List")
+    st.caption("Check items off as you shop — your progress is saved while you have the app open.")
 
     try:
         ss       = get_ss()
@@ -334,25 +383,113 @@ elif page == "🛒  Shopping List":
     if shop_df.empty:
         st.info("Your shopping list is empty. Generate a meal plan first, then save it.")
     else:
-        cost_col = next((c for c in shop_df.columns if "cost" in c.lower()), None)
+        # ── Rename columns to clean display headers ───────────────────────────
+        col_rename = {
+            "ingredient":      "Ingredient",
+            "total_quantity":  "Qty",
+            "unit":            "Unit",
+            "best_store":      "Best Store",
+            "unit_price":      "Unit Price",
+            "estimated_cost":  "Est. Cost",
+            "in_pantry":       "Got it ✓",
+            "notes":           "Notes",
+        }
+        shop_df = shop_df.rename(columns={
+            k: v for k, v in col_rename.items() if k in shop_df.columns
+        })
+
+        # ── Restore or initialise the "Got it ✓" checkbox state ──────────────
+        # We keep it in session_state so ticks survive page interactions
+        if "shopping_checked" not in st.session_state:
+            # Pre-tick anything already marked in the sheet
+            existing = shop_df.get("Got it ✓", pd.Series(["No"] * len(shop_df)))
+            st.session_state["shopping_checked"] = (
+                existing.astype(str).str.lower().isin(["yes", "true", "1"]).tolist()
+            )
+        # Pad / trim if list size changed
+        n = len(shop_df)
+        checked = st.session_state["shopping_checked"]
+        if len(checked) != n:
+            checked = (checked + [False] * n)[:n]
+            st.session_state["shopping_checked"] = checked
+
+        shop_df["Got it ✓"] = checked
+
+        # ── Summary metrics ───────────────────────────────────────────────────
+        cost_col = "Est. Cost" if "Est. Cost" in shop_df.columns else None
         if cost_col:
-            total = pd.to_numeric(shop_df[cost_col], errors="coerce").sum()
+            total     = pd.to_numeric(shop_df[cost_col], errors="coerce").sum()
+            remaining = pd.to_numeric(
+                shop_df.loc[~shop_df["Got it ✓"], cost_col], errors="coerce"
+            ).sum()
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Total items", n)
             if total:
-                st.metric("Estimated total", f"${total:.2f} CAD")
+                m2.metric("Estimated total", f"${total:.2f} CAD")
+                m3.metric("Still to buy", f"${remaining:.2f} CAD")
 
         st.markdown("---")
 
-        store_col = next((c for c in shop_df.columns if "store" in c.lower()), None)
-        if store_col:
-            stores       = shop_df[store_col].dropna().unique()
-            store_filter = st.multiselect("Filter by store", options=sorted(stores), default=list(stores))
-            shop_df      = shop_df[shop_df[store_col].isin(store_filter)]
+        # ── Store filter — always show all Toronto stores as options ──────────
+        if "Best Store" in shop_df.columns:
+            data_stores   = shop_df["Best Store"].dropna().unique().tolist()
+            all_store_opts = sorted(set(TORONTO_STORES + data_stores) - {""})
+            present_stores = [s for s in all_store_opts if s in data_stores]
+            store_filter  = st.multiselect(
+                "Filter by store",
+                options=all_store_opts,
+                default=present_stores,
+            )
+            filtered_df = shop_df[shop_df["Best Store"].isin(store_filter)]
+        else:
+            filtered_df = shop_df
 
-        st.dataframe(shop_df, use_container_width=True, hide_index=True)
+        # ── Editable table with checkboxes ────────────────────────────────────
+        col_cfg = {}
+        if "Got it ✓" in filtered_df.columns:
+            col_cfg["Got it ✓"] = st.column_config.CheckboxColumn(
+                "Got it ✓", help="Tick when you've picked this up", default=False
+            )
+        if "Est. Cost" in filtered_df.columns:
+            col_cfg["Est. Cost"] = st.column_config.NumberColumn(
+                "Est. Cost", format="$%.2f"
+            )
+        if "Unit Price" in filtered_df.columns:
+            col_cfg["Unit Price"] = st.column_config.NumberColumn(
+                "Unit Price", format="$%.4f"
+            )
 
-        csv = shop_df.to_csv(index=False)
-        st.download_button("⬇️ Download as CSV", data=csv,
-                           file_name=f"shopping_list_{date.today()}.csv", mime="text/csv")
+        edited = st.data_editor(
+            filtered_df,
+            column_config=col_cfg,
+            use_container_width=True,
+            hide_index=True,
+            disabled=[c for c in filtered_df.columns if c != "Got it ✓"],
+        )
+
+        # Persist checkbox changes back to session_state
+        if "Got it ✓" in edited.columns:
+            # Map filtered indices back to full list
+            full_checked = list(st.session_state["shopping_checked"])
+            for idx, val in zip(filtered_df.index, edited["Got it ✓"].tolist()):
+                if idx < len(full_checked):
+                    full_checked[idx] = bool(val)
+            st.session_state["shopping_checked"] = full_checked
+
+        st.markdown("---")
+        col_dl, col_reset = st.columns([2, 1])
+        with col_dl:
+            csv = filtered_df.to_csv(index=False)
+            st.download_button(
+                "⬇️ Download as CSV",
+                data=csv,
+                file_name=f"shopping_list_{date.today()}.csv",
+                mime="text/csv",
+            )
+        with col_reset:
+            if st.button("↺ Uncheck all"):
+                st.session_state["shopping_checked"] = [False] * n
+                st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -476,7 +613,7 @@ elif page == "💰  Price Tracker":
                 st.success(f"Found **{len(deals)}** deals for **{search_query}**")
                 st.markdown("---")
 
-                for deal in deals[:15]:  # Show top 15
+                for i, deal in enumerate(deals[:15]):  # Show top 15
                     with st.container():
                         d_col1, d_col2, d_col3 = st.columns([3, 2, 2])
 
@@ -494,7 +631,7 @@ elif page == "💰  Price Tracker":
                             st.markdown(f"### {deal['price_text']}")
                             if deal.get("price") and st.button(
                                 "➕ Save this price",
-                                key=f"save_{deal['store']}_{deal['name'][:10]}",
+                                key=f"save_flipp_{i}",
                             ):
                                 try:
                                     ss       = get_ss()
