@@ -125,13 +125,74 @@ def load_all_data():
     return recipes_df, ing_df, prices_df
 
 
+@st.cache_data(ttl=60)
+def load_pantry():
+    """Load the Pantry tab. Returns a DataFrame (may be empty)."""
+    ss = get_sheets_connection()
+    if ss is None:
+        return pd.DataFrame()
+    try:
+        ws = ss.worksheet("Pantry")
+        return pd.DataFrame(ws.get_all_records())
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=60)
+def load_ratings():
+    """Load the Ratings tab. Returns dict of recipe_id → 'like'|'dislike'."""
+    ss = get_sheets_connection()
+    if ss is None:
+        return {}
+    try:
+        ws = ss.worksheet("Ratings")
+        df = pd.DataFrame(ws.get_all_records())
+        if df.empty or "recipe_id" not in df.columns or "rating" not in df.columns:
+            return {}
+        return dict(zip(df["recipe_id"].astype(str), df["rating"].astype(str)))
+    except Exception:
+        return {}
+
+
+def save_rating(ss, recipe_id: str, rating: str):
+    """Save or overwrite a rating in the Ratings tab."""
+    try:
+        try:
+            ws = ss.worksheet("Ratings")
+        except Exception:
+            ws = ss.add_worksheet(title="Ratings", rows=300, cols=4)
+            ws.append_row(["recipe_id", "rating", "notes", "rated_date"])
+
+        all_vals = ws.get_all_values()
+        for i, row in enumerate(all_vals[1:], start=2):
+            if row and str(row[0]).strip() == str(recipe_id).strip():
+                ws.update_cell(i, 2, rating)
+                ws.update_cell(i, 4, date.today().isoformat())
+                return
+        ws.append_row([recipe_id, rating, "", date.today().isoformat()])
+    except Exception as e:
+        st.error(f"Could not save rating: {e}")
+
+
+def get_pantry_set():
+    """Return a set of ingredient names currently marked as in-stock in the pantry."""
+    df = load_pantry()
+    if df.empty or "ingredient" not in df.columns:
+        return set()
+    in_stock_col = next((c for c in df.columns if "stock" in c.lower()), None)
+    if in_stock_col:
+        df = df[df[in_stock_col].astype(str).str.lower().isin(["yes", "true", "1", "in stock"])]
+    return set(df["ingredient"].astype(str).str.strip().str.lower().dropna())
+
+
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.title("🥗 Meal Planner")
     st.markdown("---")
     page = st.radio(
         "Go to",
-        ["➕  Add Recipe", "📖  My Recipes", "📅  Generate Meal Plan", "🛒  Shopping List", "💰  Price Tracker"],
+        ["➕  Add Recipe", "📖  My Recipes", "📅  Generate Meal Plan",
+         "🛒  Shopping List", "💰  Price Tracker", "🥫  Pantry"],
         label_visibility="collapsed",
     )
     st.markdown("---")
@@ -155,6 +216,16 @@ if page == "➕  Add Recipe":
         st.markdown("Works great with: **AllRecipes, Budget Bytes, BBC Good Food, Food Network, Epicurious, RecipeTin Eats, Simply Recipes**")
         url_input = st.text_input("Recipe URL", placeholder="https://www.allrecipes.com/recipe/...")
 
+        url_col1, url_col2, url_col3 = st.columns(3)
+        with url_col1:
+            url_tags     = st.text_input("Tags (optional)", placeholder="chicken, weeknight, slow-cooker", key="url_tags")
+        with url_col2:
+            url_cuisine  = st.text_input("Cuisine (optional)", placeholder="Italian", key="url_cuisine",
+                                         help="Leave blank to use the cuisine detected from the page, if any.")
+        with url_col3:
+            url_servings = st.text_input("Servings (optional)", placeholder="4", key="url_servings",
+                                         help="Leave blank to use the yield detected from the page.")
+
         if st.button("Fetch & Save Recipe", type="primary", key="fetch_btn"):
             if not url_input.strip():
                 st.warning("Please paste a recipe URL first.")
@@ -165,6 +236,9 @@ if page == "➕  Add Recipe":
                             url_input.strip(),
                             get_spreadsheet_id(),
                             get_credentials_path(),
+                            tags=url_tags,
+                            cuisine=url_cuisine,
+                            servings=url_servings,
                         )
                         load_all_data.clear()
                         st.success(f"✅ **{recipe['name']}** saved! ({len(ingredients)} ingredients)")
@@ -256,6 +330,7 @@ elif page == "📖  My Recipes":
     if recipes_df.empty:
         st.info("No recipes yet. Head to **Add Recipe** to get started!")
     else:
+        ratings_map = load_ratings()
         st.metric("Recipes saved", len(recipes_df))
         st.markdown("---")
 
@@ -317,6 +392,37 @@ elif page == "📖  My Recipes":
                     if tags:
                         st.markdown(render_tag_badges(tags), unsafe_allow_html=True)
 
+                    # ── Rating buttons ────────────────────────────────────────
+                    current_rating = ratings_map.get(recipe_id, "none")
+                    rating_labels  = {
+                        "like":    "👍 Liked",
+                        "dislike": "👎 Disliked",
+                        "none":    "⭐ Not rated",
+                    }
+                    st.caption(f"Your rating: **{rating_labels.get(current_rating, '—')}**  ·  Liked recipes are preferred when generating plans; disliked ones are excluded.")
+                    r_col1, r_col2, r_col3 = st.columns([1, 1, 1])
+                    with r_col1:
+                        liked_label = "👍 Liked ✓" if current_rating == "like" else "👍 Like"
+                        if st.button(liked_label, key=f"rate_like_{recipe_id}", use_container_width=True):
+                            new_rating = "none" if current_rating == "like" else "like"
+                            save_rating(get_ss(), recipe_id, new_rating)
+                            load_ratings.clear()
+                            st.rerun()
+                    with r_col2:
+                        dislike_label = "👎 Disliked ✓" if current_rating == "dislike" else "👎 Dislike"
+                        if st.button(dislike_label, key=f"rate_dislike_{recipe_id}", use_container_width=True):
+                            new_rating = "none" if current_rating == "dislike" else "dislike"
+                            save_rating(get_ss(), recipe_id, new_rating)
+                            load_ratings.clear()
+                            st.rerun()
+                    with r_col3:
+                        if current_rating != "none":
+                            if st.button("✕ Clear rating", key=f"rate_clear_{recipe_id}", use_container_width=True):
+                                save_rating(get_ss(), recipe_id, "none")
+                                load_ratings.clear()
+                                st.rerun()
+
+                    st.markdown("---")
                     recipe_ings = ing_df[ing_df["recipe_id"].astype(str) == recipe_id].copy()
                     if not recipe_ings.empty:
                         st.markdown("**Ingredients** — edit names, quantities, or units inline. Use the ＋ row at the bottom to add one, or the trash icon to delete.")
@@ -385,24 +491,32 @@ elif page == "📅  Generate Meal Plan":
             max_meals    = max(1, min(7, len(recipes_df)))  # never less than 1
             default_meals = max_meals
             num_meals    = st.slider("Dinners to plan", 1, max_meals, default_meals)
+            budget_cap   = st.number_input(
+                "Weekly grocery budget (CAD $)",
+                min_value=0.0, step=10.0, value=0.0, format="%.2f",
+                help="Set to $0 to skip budget checking. The optimizer will warn you if your estimated total exceeds this.",
+            )
             generate_btn = st.button("✨ Generate Plan", type="primary", use_container_width=True)
 
         if generate_btn or "meal_plan" in st.session_state:
             if generate_btn:
                 with st.spinner("Building your meal plan and saving to Google Sheets…"):
                     try:
+                        ratings_map  = load_ratings()
+                        pantry_set   = get_pantry_set()
                         ing_map      = build_ingredient_map(ing_df)
                         price_map    = build_price_map(prices_df)
                         recipe_ids   = list(recipes_df["recipe_id"].astype(str))
                         recipe_names = dict(zip(recipes_df["recipe_id"].astype(str), recipes_df["name"]))
-                        selected_ids = greedy_meal_plan(recipe_ids, ing_map, num_meals)
-                        shopping     = build_shopping_list(selected_ids, ing_map, price_map)
+                        selected_ids = greedy_meal_plan(recipe_ids, ing_map, num_meals, ratings_map=ratings_map)
+                        shopping     = build_shopping_list(selected_ids, ing_map, price_map, pantry_set=pantry_set)
 
                         st.session_state["meal_plan"] = {
                             "selected_ids": selected_ids,
                             "recipe_names": recipe_names,
                             "shopping":     shopping,
                             "ing_map":      ing_map,
+                            "budget_cap":   budget_cap,
                         }
 
                         # Auto-save to Google Sheets so Shopping List tab updates immediately
@@ -425,6 +539,7 @@ elif page == "📅  Generate Meal Plan":
             recipe_names = plan["recipe_names"]
             shopping     = plan["shopping"]
             ing_map      = plan["ing_map"]
+            saved_budget = plan.get("budget_cap", 0.0)
 
             with col_right:
                 st.subheader("Your Week")
@@ -441,6 +556,22 @@ elif page == "📅  Generate Meal Plan":
                     ingredient_counts[ing].append(recipe_names.get(rid, rid))
             shared = {ing: r for ing, r in ingredient_counts.items() if len(r) > 1}
             score  = len(shared) / len(ingredient_counts) if ingredient_counts else 0
+
+            # ── Budget check ──────────────────────────────────────────────
+            est_total = sum(
+                item["estimated_cost"] for item in shopping
+                if isinstance(item.get("estimated_cost"), (int, float))
+            )
+            if saved_budget > 0 and est_total > 0:
+                over = est_total - saved_budget
+                if over > 0:
+                    st.error(
+                        f"⚠️ Estimated cost **${est_total:.2f}** is **${over:.2f} over** your "
+                        f"${saved_budget:.2f} budget. Try reducing the number of dinners or "
+                        f"swapping a recipe for one with cheaper ingredients."
+                    )
+                else:
+                    st.success(f"✅ Estimated cost **${est_total:.2f}** — ${abs(over):.2f} under your ${saved_budget:.2f} budget!")
 
             m1, m2, m3 = st.columns(3)
             m1.metric("Ingredient overlap",      f"{score:.0%}")
@@ -581,7 +712,7 @@ elif page == "🛒  Shopping List":
             st.session_state["shopping_checked"] = full_checked
 
         st.markdown("---")
-        col_dl, col_reset = st.columns([2, 1])
+        col_dl, col_reset, col_clear = st.columns([3, 1, 1])
         with col_dl:
             csv = filtered_df.to_csv(index=False)
             st.download_button(
@@ -594,6 +725,31 @@ elif page == "🛒  Shopping List":
             if st.button("↺ Uncheck all"):
                 st.session_state["shopping_checked"] = [False] * n
                 st.rerun()
+        with col_clear:
+            if st.button("🗑️ Clear list"):
+                st.session_state["confirm_clear_shopping"] = True
+
+        # Two-click confirmation — only appears after pressing "Clear list"
+        if st.session_state.get("confirm_clear_shopping"):
+            st.warning("⚠️ This will permanently erase your shopping list from Google Sheets. Are you sure?")
+            yes_col, no_col = st.columns(2)
+            with yes_col:
+                if st.button("Yes, clear it", type="primary", key="confirm_clear_yes"):
+                    try:
+                        clear_ws = get_ss().worksheet("Shopping List")
+                        all_rows = clear_ws.get_all_values()
+                        if len(all_rows) > 1:
+                            clear_ws.delete_rows(2, len(all_rows))
+                        st.session_state.pop("shopping_checked", None)
+                        st.session_state.pop("confirm_clear_shopping", None)
+                        load_all_data.clear()
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Could not clear the list: {e}")
+            with no_col:
+                if st.button("Cancel", key="confirm_clear_no"):
+                    st.session_state.pop("confirm_clear_shopping", None)
+                    st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -605,7 +761,10 @@ elif page == "💰  Price Tracker":
 
     postal_code = get_postal_code()
 
-    tab_view, tab_add, tab_flipp = st.tabs(["📋 Current Prices", "➕ Add / Update a Price", "🔍 Search Flipp Deals"])
+    tab_view, tab_add, tab_flipp, tab_auto = st.tabs([
+        "📋 Current Prices", "➕ Add / Update a Price",
+        "🔍 Search Flipp Deals", "🔄 Auto-fetch Store Prices",
+    ])
 
     # ── Tab 1: View current prices ────────────────────────────────────────────
     with tab_view:
@@ -760,3 +919,179 @@ elif page == "💰  Price Tracker":
                                     st.error(f"Could not save: {e}")
 
                         st.divider()
+
+    # ── Tab 4: Auto-fetch store prices ────────────────────────────────────────
+    with tab_auto:
+        st.markdown(
+            "Automatically search **Flipp** (flyer deals) and **Loblaws / No Frills** (regular shelf prices) "
+            "for every ingredient on your current shopping list. Results are saved to the **Store Prices** tab "
+            "in your Google Sheet. Run this once a week after generating your meal plan."
+        )
+        st.info("💡 You need to have generated a meal plan first — the scraper reads your Shopping List tab for ingredient names.")
+
+        if st.button("🔄 Fetch prices for all shopping list items", type="primary"):
+            from store_scraper import refresh_store_prices
+            with st.spinner("Searching Flipp and Loblaws/No Frills — this takes about 30–60 seconds…"):
+                try:
+                    rows_written, errors = refresh_store_prices(get_ss(), postal_code)
+                    if rows_written:
+                        st.success(f"✅ Done! Saved **{rows_written}** price entries to the Store Prices tab.")
+                    if errors:
+                        with st.expander(f"⚠️ {len(errors)} warning(s)"):
+                            for err in errors:
+                                st.caption(err)
+                    if not rows_written and not errors:
+                        st.warning("Nothing was saved. Is your shopping list empty? Generate a meal plan first.")
+                except Exception as e:
+                    st.error(f"Could not fetch prices: {e}")
+
+        st.markdown("---")
+        st.subheader("Store Prices (last fetch)")
+
+        try:
+            store_prices_ws = get_ss().worksheet("Store Prices")
+            store_prices_df = pd.DataFrame(store_prices_ws.get_all_records())
+        except Exception:
+            store_prices_df = pd.DataFrame()
+
+        if store_prices_df.empty:
+            st.caption("No data yet — hit the button above to fetch prices.")
+        else:
+            # Filter controls
+            sp_col1, sp_col2 = st.columns(2)
+            with sp_col1:
+                if "ingredient" in store_prices_df.columns:
+                    ing_filter = st.multiselect(
+                        "Filter by ingredient",
+                        options=sorted(store_prices_df["ingredient"].dropna().unique()),
+                    )
+                    if ing_filter:
+                        store_prices_df = store_prices_df[store_prices_df["ingredient"].isin(ing_filter)]
+            with sp_col2:
+                if "source" in store_prices_df.columns:
+                    src_filter = st.multiselect(
+                        "Filter by source",
+                        options=sorted(store_prices_df["source"].dropna().unique()),
+                        default=list(store_prices_df["source"].dropna().unique()),
+                    )
+                    if src_filter:
+                        store_prices_df = store_prices_df[store_prices_df["source"].isin(src_filter)]
+
+            st.dataframe(store_prices_df, use_container_width=True, hide_index=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE 6 — PANTRY
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "🥫  Pantry":
+    st.header("🥫 Pantry")
+    st.markdown(
+        "Keep track of what you already have at home. "
+        "Anything marked **In Stock** will be flagged on your shopping list so you know to skip it at the store."
+    )
+
+    pantry_df = load_pantry()
+    ss = get_ss()
+
+    # ── Ensure Pantry tab exists in Google Sheets ─────────────────────────────
+    try:
+        pantry_ws = ss.worksheet("Pantry")
+    except Exception:
+        pantry_ws = ss.add_worksheet(title="Pantry", rows=300, cols=4)
+        pantry_ws.append_row(["ingredient", "in_stock", "date_added", "notes"])
+        load_pantry.clear()
+        pantry_df = pd.DataFrame(columns=["ingredient", "in_stock", "date_added", "notes"])
+
+    # ── Add a new pantry item ─────────────────────────────────────────────────
+    with st.expander("➕ Add an item to your pantry", expanded=pantry_df.empty):
+        p_col1, p_col2 = st.columns([2, 1])
+        with p_col1:
+            new_ing   = st.text_input("Ingredient name", placeholder="olive oil, pasta, garlic…", key="pantry_new_ing")
+        with p_col2:
+            new_notes = st.text_input("Notes (optional)", placeholder="half a bag", key="pantry_new_notes")
+
+        if st.button("Add to Pantry", type="primary"):
+            if not new_ing.strip():
+                st.warning("Please enter an ingredient name.")
+            else:
+                try:
+                    pantry_ws.append_row([
+                        new_ing.strip().lower(),
+                        "Yes",
+                        date.today().isoformat(),
+                        new_notes.strip(),
+                    ])
+                    load_pantry.clear()
+                    st.success(f"✅ **{new_ing.strip()}** added to pantry!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Could not save: {e}")
+
+    st.markdown("---")
+
+    # ── Current pantry items ──────────────────────────────────────────────────
+    if pantry_df.empty or "ingredient" not in pantry_df.columns:
+        st.info("Your pantry is empty. Add items above and they'll be skipped on your shopping list.")
+    else:
+        in_stock_count = 0
+        if "in_stock" in pantry_df.columns:
+            in_stock_count = pantry_df["in_stock"].astype(str).str.lower().isin(["yes", "true", "1"]).sum()
+        st.metric("Items in pantry", f"{in_stock_count} in stock / {len(pantry_df)} total")
+
+        # Show pantry as an editable table so users can toggle in_stock and edit notes
+        edit_cols = [c for c in ["ingredient", "in_stock", "notes"] if c in pantry_df.columns]
+        pantry_edit_df = pantry_df[edit_cols].reset_index(drop=True)
+
+        edited_pantry = st.data_editor(
+            pantry_edit_df,
+            use_container_width=True,
+            hide_index=True,
+            num_rows="fixed",
+            key="pantry_editor",
+            column_config={
+                "ingredient": st.column_config.TextColumn("Ingredient"),
+                "in_stock":   st.column_config.CheckboxColumn(
+                    "In Stock?",
+                    help="Tick if you have this at home. Untick when you've used it up.",
+                    default=True,
+                ),
+                "notes":      st.column_config.TextColumn("Notes"),
+            },
+        )
+
+        if st.button("💾 Save pantry changes"):
+            with st.spinner("Saving…"):
+                try:
+                    # Rewrite the whole sheet to reflect edits
+                    all_vals = pantry_ws.get_all_values()
+                    header   = all_vals[0] if all_vals else ["ingredient", "in_stock", "date_added", "notes"]
+
+                    # Preserve date_added from the original sheet
+                    orig_dates = {}
+                    for row in all_vals[1:]:
+                        if row:
+                            orig_dates[str(row[0]).strip().lower()] = row[2] if len(row) > 2 else ""
+
+                    new_rows = [header]
+                    for _, r in edited_pantry.iterrows():
+                        ing = str(r.get("ingredient", "")).strip().lower()
+                        if not ing:
+                            continue
+                        in_stock_val = "Yes" if r.get("in_stock") else "No"
+                        new_rows.append([
+                            ing,
+                            in_stock_val,
+                            orig_dates.get(ing, date.today().isoformat()),
+                            str(r.get("notes", "")).strip(),
+                        ])
+
+                    pantry_ws.clear()
+                    pantry_ws.update("A1", new_rows)
+                    load_pantry.clear()
+                    st.success("✅ Pantry updated!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Could not save: {e}")
+
+        st.markdown("---")
+        st.caption("To remove an item entirely, clear its ingredient name and save — blank rows are dropped automatically.")

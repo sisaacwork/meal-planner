@@ -41,7 +41,14 @@ HEADERS = {
 }
 
 
-def ingest_recipe(url: str, spreadsheet_id: str, credentials_path: str = "credentials.json"):
+def ingest_recipe(
+    url: str,
+    spreadsheet_id: str,
+    credentials_path: str = "credentials.json",
+    tags: str = "",
+    cuisine: str = "",
+    servings: str = "",
+):
     """
     Main function. Scrapes the URL and writes to Google Sheets.
     Returns (recipe_dict, list_of_ingredient_dicts).
@@ -64,13 +71,16 @@ def ingest_recipe(url: str, spreadsheet_id: str, credentials_path: str = "creden
 
     recipe_id = str(uuid.uuid4())[:8]  # Short unique ID, e.g. "a1b2c3d4"
 
+    scraped_cuisine  = (scraper.cuisine() or "").strip()
+    scraped_servings = scraper.yields() or "4"
+
     recipe = {
-        "id": recipe_id,
-        "name": scraper.title() or "Unknown Recipe",
-        "url": url,
-        "servings": scraper.yields() or "4",
-        "cuisine": (scraper.cuisine() or "").strip(),
-        "tags": "",
+        "id":         recipe_id,
+        "name":       scraper.title() or "Unknown Recipe",
+        "url":        url,
+        "servings":   servings.strip() if servings.strip() else scraped_servings,
+        "cuisine":    cuisine.strip()  if cuisine.strip()  else scraped_cuisine,
+        "tags":       tags.strip(),   # user-provided tags; scraped pages rarely supply these
         "date_added": date.today().isoformat(),
     }
 

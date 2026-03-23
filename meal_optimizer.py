@@ -137,14 +137,25 @@ def overlap_score(selected_ids, candidate_id, ing_map):
     return shared / total
 
 
-def greedy_meal_plan(recipe_ids, ing_map, num_meals):
+def greedy_meal_plan(recipe_ids, ing_map, num_meals, ratings_map=None):
     """
     Greedy algorithm: pick recipes one at a time.
     Each pick chooses whichever recipe maximizes ingredient overlap
     with the ones already chosen.
+
+    ratings_map (optional): dict of recipe_id → "like" | "dislike"
+      - Disliked recipes are excluded from the pool entirely.
+      - Liked recipes get a +0.2 score bonus so they're preferred when close.
     """
-    num_meals = min(num_meals, len(recipe_ids))
+    # Filter out recipes you've marked as disliked
+    if ratings_map:
+        recipe_ids = [r for r in recipe_ids if ratings_map.get(r) != "dislike"]
+
+    num_meals = min(num_meals, max(1, len(recipe_ids)))
     remaining = list(recipe_ids)
+
+    if not remaining:
+        return []
 
     # Seed: start with the recipe that has the most ingredients
     # (more ingredients = more potential for overlap with others)
@@ -157,6 +168,9 @@ def greedy_meal_plan(recipe_ids, ing_map, num_meals):
         best_recipe = None
         for candidate in remaining:
             score = overlap_score(selected, candidate, ing_map)
+            # Liked recipes get a small boost so they're preferred when scores are close
+            if ratings_map and ratings_map.get(candidate) == "like":
+                score = min(1.0, score + 0.2)
             if score > best_score:
                 best_score = score
                 best_recipe = candidate
@@ -168,7 +182,7 @@ def greedy_meal_plan(recipe_ids, ing_map, num_meals):
 
 # ── Output formatting ─────────────────────────────────────────────────────────
 
-def build_shopping_list(selected_ids, ing_map, price_map):
+def build_shopping_list(selected_ids, ing_map, price_map, pantry_set=None):
     """
     Consolidate all ingredients across selected recipes.
 
@@ -176,6 +190,10 @@ def build_shopping_list(selected_ids, ing_map, price_map):
     compatible units (e.g. "cup" and "ml"), they are first converted to a
     common base (ml or g) and summed, then smart-formatted back to metric.
     Incompatible units (e.g. "whole" vs "g") are kept as separate rows.
+
+    pantry_set (optional): set of ingredient names you already have at home.
+      Items in the pantry are included in the list but flagged in_pantry="Yes"
+      so they're easy to skip at the store.
     """
     # ingredient → base_unit ("ml"/"g"/original) → total base quantity
     base_totals: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
@@ -204,6 +222,7 @@ def build_shopping_list(selected_ids, ing_map, price_map):
             if price_info.get("price_per_unit"):
                 estimated_cost = round(display_qty * price_info["price_per_unit"], 2)
 
+            in_pantry = "Yes" if (pantry_set and ingredient in pantry_set) else "No"
             shopping.append({
                 "ingredient":     ingredient,
                 "total_quantity": display_qty,
@@ -211,7 +230,7 @@ def build_shopping_list(selected_ids, ing_map, price_map):
                 "best_store":     price_info.get("store", "—"),
                 "unit_price":     price_info.get("price_per_unit", ""),
                 "estimated_cost": estimated_cost,
-                "in_pantry":      "No",
+                "in_pantry":      in_pantry,
                 "notes":          "ON SALE" if price_info.get("on_sale") else "",
             })
     return shopping
@@ -307,6 +326,34 @@ def write_plan_to_sheets(ss, selected_ids, recipe_names, ing_map, price_map):
     ]
     shop_ws.append_rows(shop_rows)
     print(f"✅ Shopping List tab updated ({len(shop_rows)} items)")
+
+    # ── Price Tracker sync ───────────────────────────────────────────────────
+    # Add placeholder rows for any shopping-list ingredients that aren't
+    # already tracked in the Price Tracker, so users know what to look up.
+    try:
+        price_ws = ss.worksheet("Price Tracker")
+        existing_prices = pd.DataFrame(price_ws.get_all_records())
+        already_tracked: set = set()
+        if not existing_prices.empty and "ingredient" in existing_prices.columns:
+            already_tracked = set(
+                existing_prices["ingredient"].astype(str).str.strip().str.lower().dropna()
+            )
+
+        new_price_rows = []
+        seen_this_batch: set = set()
+        for item in shopping:
+            ing = item["ingredient"].strip().lower()
+            if ing and ing not in already_tracked and ing not in seen_this_batch:
+                # Columns: ingredient, store, brand_size, price, qty_amount,
+                #          qty_unit, price_per_unit, on_sale, sale_ends, notes
+                new_price_rows.append([ing, "", "", "", "", item["unit"], "", "No", "", "Add price"])
+                seen_this_batch.add(ing)
+
+        if new_price_rows:
+            price_ws.append_rows(new_price_rows)
+            print(f"✅ Price Tracker updated ({len(new_price_rows)} new ingredients added)")
+    except Exception as e:
+        print(f"⚠️  Could not sync Price Tracker: {e}")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
