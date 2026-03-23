@@ -76,6 +76,45 @@ def get_ss():
     return ss
 
 
+def save_ingredient_edits(ss, recipe_id: str, edited_df: pd.DataFrame):
+    """
+    Replace all ingredient rows for a recipe in Google Sheets with the edited version.
+    Strategy: delete existing rows for this recipe (bottom-up), then append new ones.
+    """
+    ing_ws = ss.worksheet("Ingredients")
+    all_values = ing_ws.get_all_values()  # includes header row
+
+    # Find 1-based sheet row numbers that belong to this recipe (skip header at index 0)
+    rows_to_delete = [
+        i + 2  # +1 for 0-index → 1-index, +1 for header row
+        for i, row in enumerate(all_values[1:])
+        if row and str(row[0]).strip() == str(recipe_id).strip()
+    ]
+
+    # Delete from bottom to top so row numbers don't shift mid-deletion
+    for row_num in sorted(rows_to_delete, reverse=True):
+        ing_ws.delete_rows(row_num)
+
+    # Append the edited rows (drop any rows the user left completely blank)
+    recipe_name = edited_df["recipe_name"].iloc[0] if "recipe_name" in edited_df.columns else ""
+    new_rows = []
+    for _, r in edited_df.iterrows():
+        ingredient = str(r.get("ingredient", "")).strip()
+        if not ingredient:
+            continue  # skip blank rows
+        new_rows.append([
+            recipe_id,
+            recipe_name,
+            ingredient,
+            r.get("quantity", 1),
+            r.get("unit", "whole"),
+            r.get("original", ingredient),  # keep original if present, else use edited name
+        ])
+
+    if new_rows:
+        ing_ws.append_rows(new_rows)
+
+
 @st.cache_data(ttl=60, show_spinner="Loading recipes…")
 def load_all_data():
     ss = get_sheets_connection()
@@ -277,12 +316,53 @@ elif page == "📖  My Recipes":
                     if tags:
                         st.markdown(render_tag_badges(tags), unsafe_allow_html=True)
 
-                    recipe_ings = ing_df[ing_df["recipe_id"].astype(str) == recipe_id]
+                    recipe_ings = ing_df[ing_df["recipe_id"].astype(str) == recipe_id].copy()
                     if not recipe_ings.empty:
-                        st.markdown("**Ingredients:**")
-                        show_cols = [c for c in ["ingredient", "quantity", "unit"] if c in recipe_ings.columns]
-                        st.dataframe(recipe_ings[show_cols].reset_index(drop=True),
-                                     use_container_width=True, hide_index=True)
+                        st.markdown("**Ingredients** — edit names, quantities, or units inline. Use the ＋ row at the bottom to add one, or the trash icon to delete.")
+
+                        UNIT_OPTIONS = [
+                            "whole", "g", "kg", "ml", "litre", "cup", "tbsp", "tsp",
+                            "lb", "oz", "clove", "can", "pkg", "slice", "bunch",
+                            "handful", "pinch", "dash", "sprig",
+                        ]
+
+                        edit_cols = [c for c in ["ingredient", "quantity", "unit", "recipe_name"] if c in recipe_ings.columns]
+                        edit_df = recipe_ings[edit_cols].reset_index(drop=True)
+
+                        edited = st.data_editor(
+                            edit_df,
+                            num_rows="dynamic",
+                            use_container_width=True,
+                            hide_index=True,
+                            key=f"ing_editor_{recipe_id}",
+                            column_config={
+                                "ingredient": st.column_config.TextColumn(
+                                    "Ingredient", help="Edit the ingredient name"
+                                ),
+                                "quantity": st.column_config.NumberColumn(
+                                    "Qty", min_value=0, step=0.25, format="%.2f"
+                                ),
+                                "unit": st.column_config.SelectboxColumn(
+                                    "Unit", options=UNIT_OPTIONS
+                                ),
+                                "recipe_name": None,  # hide this column
+                            },
+                        )
+
+                        if st.button("💾 Save ingredient changes", key=f"save_ing_{recipe_id}"):
+                            with st.spinner("Saving…"):
+                                try:
+                                    ss = get_ss()
+                                    # Carry recipe_name forward for rows added by the user
+                                    if "recipe_name" not in edited.columns:
+                                        edited["recipe_name"] = name
+                                    else:
+                                        edited["recipe_name"] = edited["recipe_name"].fillna(name)
+                                    save_ingredient_edits(ss, recipe_id, edited)
+                                    load_all_data.clear()
+                                    st.success("✅ Ingredients updated!")
+                                except Exception as e:
+                                    st.error(f"Could not save: {e}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
