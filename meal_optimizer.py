@@ -182,7 +182,7 @@ def greedy_meal_plan(recipe_ids, ing_map, num_meals, ratings_map=None):
 
 # ── Output formatting ─────────────────────────────────────────────────────────
 
-def build_shopping_list(selected_ids, ing_map, price_map, pantry_set=None):
+def build_shopping_list(selected_ids, ing_map, price_map, pantry_map=None):
     """
     Consolidate all ingredients across selected recipes.
 
@@ -191,9 +191,13 @@ def build_shopping_list(selected_ids, ing_map, price_map, pantry_set=None):
     common base (ml or g) and summed, then smart-formatted back to metric.
     Incompatible units (e.g. "whole" vs "g") are kept as separate rows.
 
-    pantry_set (optional): set of ingredient names you already have at home.
-      Items in the pantry are included in the list but flagged in_pantry="Yes"
-      so they're easy to skip at the store.
+    pantry_map (optional): dict of ingredient → {quantity, unit} for items
+      you already have at home.
+      - If pantry covers the full needed quantity → in_pantry="Yes", item
+        is pre-ticked on the shopping list.
+      - If pantry covers part of it → quantity is reduced to the remainder,
+        and a "🧺 Partial (have X unit)" note is added.
+      - If pantry has no quantity info → in_pantry="Yes" (assume covered).
     """
     # ingredient → base_unit ("ml"/"g"/original) → total base quantity
     base_totals: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
@@ -213,16 +217,69 @@ def build_shopping_list(selected_ids, ing_map, price_map, pantry_set=None):
     shopping = []
     for ingredient, buckets in sorted(base_totals.items()):
         for base_unit, total_base_qty in buckets.items():
-            # Smart-format: convert base ml/g to the tidiest metric representation
-            display_qty, display_unit = convert_to_metric(total_base_qty, base_unit)
 
-            price_info = price_map.get(ingredient, {})
-            # Cost estimate uses display quantity and the stored unit price
+            # ── Pantry adjustment (before display formatting) ─────────────
+            in_pantry   = "No"
+            pantry_note = ""
+            adj_qty     = total_base_qty   # may be reduced by what's in stock
+
+            if pantry_map and ingredient in pantry_map:
+                p_info  = pantry_map[ingredient]
+                p_qty   = p_info.get("quantity")
+                p_unit  = str(p_info.get("unit", "")).strip()
+
+                if p_qty and p_unit:
+                    have_base = normalise_to_base(float(p_qty), p_unit)
+                    need_base = normalise_to_base(total_base_qty, base_unit)
+
+                    if have_base and need_base and same_dimension(have_base[1], need_base[1]):
+                        # Both are volume or both are weight → compare directly
+                        have_qty_base = have_base[0]
+                        need_qty_base = need_base[0]
+                        if have_qty_base >= need_qty_base:
+                            in_pantry   = "Yes"
+                            pantry_note = "🧺 In pantry"
+                        else:
+                            # Need to buy the shortfall
+                            diff = need_qty_base - have_qty_base
+                            adj_qty = diff             # still in the base unit (ml or g)
+                            h_disp, h_unit = convert_to_metric(have_qty_base, have_base[1])
+                            pantry_note = f"🧺 Partial (have {h_disp} {h_unit})"
+
+                    elif not have_base and not need_base:
+                        # Both are count/whole units — compare if units match
+                        if p_unit.lower() == base_unit.lower():
+                            if float(p_qty) >= total_base_qty:
+                                in_pantry   = "Yes"
+                                pantry_note = "🧺 In pantry"
+                            else:
+                                adj_qty = total_base_qty - float(p_qty)
+                                pantry_note = f"🧺 Partial (have {p_qty} {p_unit})"
+                        else:
+                            # Different count units (e.g. "clove" vs "whole") — assume covered
+                            in_pantry   = "Yes"
+                            pantry_note = "🧺 In pantry"
+                    else:
+                        # Volume vs weight mismatch — can't subtract, assume covered
+                        in_pantry   = "Yes"
+                        pantry_note = "🧺 In pantry"
+                else:
+                    # No quantity recorded — assume they have enough
+                    in_pantry   = "Yes"
+                    pantry_note = "🧺 In pantry"
+
+            # Smart-format the (possibly reduced) quantity
+            display_qty, display_unit = convert_to_metric(adj_qty, base_unit)
+
+            price_info     = price_map.get(ingredient, {})
             estimated_cost = ""
-            if price_info.get("price_per_unit"):
+            if price_info.get("price_per_unit") and in_pantry != "Yes":
                 estimated_cost = round(display_qty * price_info["price_per_unit"], 2)
 
-            in_pantry = "Yes" if (pantry_set and ingredient in pantry_set) else "No"
+            notes_parts = [pantry_note] if pantry_note else []
+            if price_info.get("on_sale"):
+                notes_parts.append("ON SALE")
+
             shopping.append({
                 "ingredient":     ingredient,
                 "total_quantity": display_qty,
@@ -231,7 +288,7 @@ def build_shopping_list(selected_ids, ing_map, price_map, pantry_set=None):
                 "unit_price":     price_info.get("price_per_unit", ""),
                 "estimated_cost": estimated_cost,
                 "in_pantry":      in_pantry,
-                "notes":          "ON SALE" if price_info.get("on_sale") else "",
+                "notes":          "  ".join(notes_parts),
             })
     return shopping
 

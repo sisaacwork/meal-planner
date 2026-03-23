@@ -174,15 +174,29 @@ def save_rating(ss, recipe_id: str, rating: str):
         st.error(f"Could not save rating: {e}")
 
 
-def get_pantry_set():
-    """Return a set of ingredient names currently marked as in-stock in the pantry."""
+def get_pantry_map():
+    """
+    Return a dict of in-stock pantry items:
+      { ingredient_name: { "quantity": float|None, "unit": str } }
+    Only items where in_stock is truthy are included.
+    """
     df = load_pantry()
     if df.empty or "ingredient" not in df.columns:
-        return set()
-    in_stock_col = next((c for c in df.columns if "stock" in c.lower()), None)
-    if in_stock_col:
-        df = df[df[in_stock_col].astype(str).str.lower().isin(["yes", "true", "1", "in stock"])]
-    return set(df["ingredient"].astype(str).str.strip().str.lower().dropna())
+        return {}
+    if "in_stock" in df.columns:
+        df = df[df["in_stock"].astype(str).str.lower().isin(["yes", "true", "1"])]
+    result = {}
+    for _, row in df.iterrows():
+        ing = str(row.get("ingredient", "")).strip().lower()
+        if not ing:
+            continue
+        try:
+            qty = float(row.get("quantity", "")) if str(row.get("quantity", "")).strip() else None
+        except (ValueError, TypeError):
+            qty = None
+        unit = str(row.get("unit", "")).strip()
+        result[ing] = {"quantity": qty, "unit": unit}
+    return result
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -503,13 +517,13 @@ elif page == "📅  Generate Meal Plan":
                 with st.spinner("Building your meal plan and saving to Google Sheets…"):
                     try:
                         ratings_map  = load_ratings()
-                        pantry_set   = get_pantry_set()
+                        pantry_map   = get_pantry_map()
                         ing_map      = build_ingredient_map(ing_df)
                         price_map    = build_price_map(prices_df)
                         recipe_ids   = list(recipes_df["recipe_id"].astype(str))
                         recipe_names = dict(zip(recipes_df["recipe_id"].astype(str), recipes_df["name"]))
                         selected_ids = greedy_meal_plan(recipe_ids, ing_map, num_meals, ratings_map=ratings_map)
-                        shopping     = build_shopping_list(selected_ids, ing_map, price_map, pantry_set=pantry_set)
+                        shopping     = build_shopping_list(selected_ids, ing_map, price_map, pantry_map=pantry_map)
 
                         st.session_state["meal_plan"] = {
                             "selected_ids": selected_ids,
@@ -986,29 +1000,61 @@ elif page == "💰  Price Tracker":
 elif page == "🥫  Pantry":
     st.header("🥫 Pantry")
     st.markdown(
-        "Keep track of what you already have at home. "
-        "Anything marked **In Stock** will be flagged on your shopping list so you know to skip it at the store."
+        "Track what you already have at home — and how much. "
+        "When you generate a meal plan, the shopping list automatically subtracts what's in your pantry. "
+        "If you have **enough** of something, it's pre-ticked as 'Got it'. "
+        "If you only have **some** of it, it shows the reduced quantity you still need to buy."
     )
 
     pantry_df = load_pantry()
-    ss = get_ss()
+    ss        = get_ss()
 
-    # ── Ensure Pantry tab exists in Google Sheets ─────────────────────────────
+    PANTRY_UNIT_OPTIONS = [
+        "ml", "L", "g", "kg", "oz", "lb",
+        "cup", "tbsp", "tsp",
+        "whole", "clove", "can", "pkg", "slice", "bunch",
+    ]
+    PANTRY_HEADER = ["ingredient", "in_stock", "quantity", "unit", "date_added", "notes"]
+
+    # ── Ensure Pantry tab exists and has the right columns ────────────────────
     try:
         pantry_ws = ss.worksheet("Pantry")
+        # Migrate old sheets that don't yet have quantity/unit columns
+        existing_header = pantry_ws.row_values(1)
+        if "quantity" not in existing_header:
+            # Rebuild header without touching data rows
+            pantry_ws.clear()
+            all_old = pantry_df.copy()
+            pantry_ws.append_row(PANTRY_HEADER)
+            for _, old_row in all_old.iterrows():
+                pantry_ws.append_row([
+                    str(old_row.get("ingredient", "")).strip().lower(),
+                    "Yes" if str(old_row.get("in_stock", "Yes")).lower() in ["yes","true","1"] else "No",
+                    "",   # quantity — blank for migrated rows
+                    "",   # unit — blank for migrated rows
+                    str(old_row.get("date_added", date.today().isoformat())),
+                    str(old_row.get("notes", "")),
+                ])
+            load_pantry.clear()
+            pantry_df = load_pantry()
     except Exception:
-        pantry_ws = ss.add_worksheet(title="Pantry", rows=300, cols=4)
-        pantry_ws.append_row(["ingredient", "in_stock", "date_added", "notes"])
+        pantry_ws = ss.add_worksheet(title="Pantry", rows=300, cols=6)
+        pantry_ws.append_row(PANTRY_HEADER)
         load_pantry.clear()
-        pantry_df = pd.DataFrame(columns=["ingredient", "in_stock", "date_added", "notes"])
+        pantry_df = pd.DataFrame(columns=PANTRY_HEADER)
 
     # ── Add a new pantry item ─────────────────────────────────────────────────
     with st.expander("➕ Add an item to your pantry", expanded=pantry_df.empty):
-        p_col1, p_col2 = st.columns([2, 1])
-        with p_col1:
-            new_ing   = st.text_input("Ingredient name", placeholder="olive oil, pasta, garlic…", key="pantry_new_ing")
-        with p_col2:
-            new_notes = st.text_input("Notes (optional)", placeholder="half a bag", key="pantry_new_notes")
+        p_c1, p_c2, p_c3, p_c4 = st.columns([3, 1, 1, 2])
+        with p_c1:
+            new_ing  = st.text_input("Ingredient", placeholder="olive oil, pasta, garlic…", key="pantry_new_ing")
+        with p_c2:
+            new_qty  = st.number_input("Qty on hand", min_value=0.0, step=0.5, value=0.0, key="pantry_new_qty",
+                                       help="Leave at 0 to mean 'I have some, unsure of amount'")
+        with p_c3:
+            new_unit = st.selectbox("Unit", PANTRY_UNIT_OPTIONS, key="pantry_new_unit")
+        with p_c4:
+            new_notes = st.text_input("Notes (optional)", placeholder="back of cupboard", key="pantry_new_notes")
 
         if st.button("Add to Pantry", type="primary"):
             if not new_ing.strip():
@@ -1018,11 +1064,14 @@ elif page == "🥫  Pantry":
                     pantry_ws.append_row([
                         new_ing.strip().lower(),
                         "Yes",
+                        new_qty if new_qty > 0 else "",
+                        new_unit if new_qty > 0 else "",
                         date.today().isoformat(),
                         new_notes.strip(),
                     ])
                     load_pantry.clear()
-                    st.success(f"✅ **{new_ing.strip()}** added to pantry!")
+                    qty_str = f"{new_qty} {new_unit}" if new_qty > 0 else "some (quantity unspecified)"
+                    st.success(f"✅ **{new_ing.strip()}** added — {qty_str}")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Could not save: {e}")
@@ -1031,56 +1080,81 @@ elif page == "🥫  Pantry":
 
     # ── Current pantry items ──────────────────────────────────────────────────
     if pantry_df.empty or "ingredient" not in pantry_df.columns:
-        st.info("Your pantry is empty. Add items above and they'll be skipped on your shopping list.")
+        st.info("Your pantry is empty. Add items above and they'll be used when generating your shopping list.")
     else:
         in_stock_count = 0
         if "in_stock" in pantry_df.columns:
-            in_stock_count = pantry_df["in_stock"].astype(str).str.lower().isin(["yes", "true", "1"]).sum()
-        st.metric("Items in pantry", f"{in_stock_count} in stock / {len(pantry_df)} total")
+            in_stock_count = int(pantry_df["in_stock"].astype(str).str.lower().isin(["yes", "true", "1"]).sum())
+        st.metric("Items tracked", f"{in_stock_count} in stock / {len(pantry_df)} total")
 
-        # Show pantry as an editable table so users can toggle in_stock and edit notes
-        edit_cols = [c for c in ["ingredient", "in_stock", "notes"] if c in pantry_df.columns]
+        # Build the display DataFrame — ensure quantity and unit columns exist
+        for col in ["quantity", "unit"]:
+            if col not in pantry_df.columns:
+                pantry_df[col] = ""
+
+        edit_cols      = [c for c in ["ingredient", "in_stock", "quantity", "unit", "notes"] if c in pantry_df.columns]
         pantry_edit_df = pantry_df[edit_cols].reset_index(drop=True)
+
+        # Coerce quantity to numeric so the NumberColumn renders properly
+        pantry_edit_df["quantity"] = pd.to_numeric(pantry_edit_df["quantity"], errors="coerce")
+
+        st.caption("✏️ Edit any cell directly. Use the **trash icon** on the left to delete a row. Hit **Save** when done.")
 
         edited_pantry = st.data_editor(
             pantry_edit_df,
             use_container_width=True,
-            hide_index=True,
-            num_rows="fixed",
+            hide_index=False,       # show row index so trash icon appears
+            num_rows="dynamic",     # enables the trash / add-row controls
             key="pantry_editor",
             column_config={
-                "ingredient": st.column_config.TextColumn("Ingredient"),
-                "in_stock":   st.column_config.CheckboxColumn(
+                "ingredient": st.column_config.TextColumn(
+                    "Ingredient",
+                    help="Ingredient name (lowercase matches best)",
+                ),
+                "in_stock": st.column_config.CheckboxColumn(
                     "In Stock?",
-                    help="Tick if you have this at home. Untick when you've used it up.",
+                    help="Un-tick when you've used it up — it'll be treated as not in the pantry.",
                     default=True,
                 ),
-                "notes":      st.column_config.TextColumn("Notes"),
+                "quantity": st.column_config.NumberColumn(
+                    "Qty on hand",
+                    help="How much you have right now. Leave blank if you don't know the exact amount.",
+                    min_value=0.0,
+                    step=0.5,
+                    format="%.2f",
+                ),
+                "unit": st.column_config.SelectboxColumn(
+                    "Unit",
+                    options=PANTRY_UNIT_OPTIONS,
+                    help="Unit for the quantity above.",
+                ),
+                "notes": st.column_config.TextColumn("Notes"),
             },
         )
 
-        if st.button("💾 Save pantry changes"):
+        if st.button("💾 Save pantry changes", type="primary"):
             with st.spinner("Saving…"):
                 try:
-                    # Rewrite the whole sheet to reflect edits
-                    all_vals = pantry_ws.get_all_values()
-                    header   = all_vals[0] if all_vals else ["ingredient", "in_stock", "date_added", "notes"]
-
-                    # Preserve date_added from the original sheet
+                    # Preserve date_added for existing rows
+                    all_vals   = pantry_ws.get_all_values()
                     orig_dates = {}
                     for row in all_vals[1:]:
                         if row:
-                            orig_dates[str(row[0]).strip().lower()] = row[2] if len(row) > 2 else ""
+                            orig_dates[str(row[0]).strip().lower()] = row[4] if len(row) > 4 else ""
 
-                    new_rows = [header]
+                    new_rows = [PANTRY_HEADER]
                     for _, r in edited_pantry.iterrows():
                         ing = str(r.get("ingredient", "")).strip().lower()
                         if not ing:
-                            continue
+                            continue   # skip blank / deleted rows
+                        qty_val      = r.get("quantity", "")
+                        qty_str      = str(qty_val) if pd.notna(qty_val) and qty_val != "" else ""
                         in_stock_val = "Yes" if r.get("in_stock") else "No"
                         new_rows.append([
                             ing,
                             in_stock_val,
+                            qty_str,
+                            str(r.get("unit", "")).strip(),
                             orig_dates.get(ing, date.today().isoformat()),
                             str(r.get("notes", "")).strip(),
                         ])
@@ -1088,10 +1162,15 @@ elif page == "🥫  Pantry":
                     pantry_ws.clear()
                     pantry_ws.update("A1", new_rows)
                     load_pantry.clear()
-                    st.success("✅ Pantry updated!")
+                    st.success(f"✅ Pantry saved — {len(new_rows) - 1} items.")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Could not save: {e}")
 
         st.markdown("---")
-        st.caption("To remove an item entirely, clear its ingredient name and save — blank rows are dropped automatically.")
+        st.info(
+            "💡 **How quantities work on your shopping list:**\n\n"
+            "- If you have **more than enough** (e.g. 500 ml olive oil, recipe needs 200 ml) → item is pre-ticked 'Got it'.\n"
+            "- If you have **some but not enough** (e.g. 100 ml, recipe needs 300 ml) → shopping list shows the remaining 200 ml needed.\n"
+            "- If **no quantity is entered** → item is treated as fully covered and pre-ticked."
+        )
