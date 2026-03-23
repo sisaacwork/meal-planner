@@ -30,6 +30,7 @@ from datetime import date, timedelta
 import pandas as pd
 
 from sheets_client import get_client, get_spreadsheet
+from unit_converter import normalise_to_base, same_dimension, convert_to_metric
 
 
 DAYS_OF_WEEK = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -170,30 +171,48 @@ def greedy_meal_plan(recipe_ids, ing_map, num_meals):
 def build_shopping_list(selected_ids, ing_map, price_map):
     """
     Consolidate all ingredients across selected recipes.
-    Quantities with the same unit are summed; different units are listed separately.
-    Returns a list of dicts sorted by ingredient name.
+
+    Unit normalisation: if the same ingredient appears with different but
+    compatible units (e.g. "cup" and "ml"), they are first converted to a
+    common base (ml or g) and summed, then smart-formatted back to metric.
+    Incompatible units (e.g. "whole" vs "g") are kept as separate rows.
     """
-    totals = defaultdict(lambda: defaultdict(float))  # ingredient → unit → total_qty
+    # ingredient → base_unit ("ml"/"g"/original) → total base quantity
+    base_totals: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+
     for rid in selected_ids:
         for ingredient, details in ing_map.get(rid, {}).items():
-            totals[ingredient][details["unit"]] += details["quantity"]
+            qty  = details["quantity"]
+            unit = details["unit"]
+            base = normalise_to_base(qty, unit)
+            if base:
+                base_qty, base_unit = base
+                base_totals[ingredient][base_unit] += base_qty
+            else:
+                # Count unit or unknown — bucket by the unit itself
+                base_totals[ingredient][unit] += qty
 
     shopping = []
-    for ingredient, units in sorted(totals.items()):
-        for unit, total_qty in units.items():
+    for ingredient, buckets in sorted(base_totals.items()):
+        for base_unit, total_base_qty in buckets.items():
+            # Smart-format: convert base ml/g to the tidiest metric representation
+            display_qty, display_unit = convert_to_metric(total_base_qty, base_unit)
+
             price_info = price_map.get(ingredient, {})
+            # Cost estimate uses display quantity and the stored unit price
+            estimated_cost = ""
+            if price_info.get("price_per_unit"):
+                estimated_cost = round(display_qty * price_info["price_per_unit"], 2)
+
             shopping.append({
-                "ingredient": ingredient,
-                "total_quantity": round(total_qty, 2),
-                "unit": unit,
-                "best_store": price_info.get("store", "—"),
-                "unit_price": price_info.get("price_per_unit", ""),
-                "estimated_cost": (
-                    round(total_qty * price_info["price_per_unit"], 2)
-                    if price_info.get("price_per_unit") else ""
-                ),
-                "in_pantry": "No",
-                "notes": "ON SALE" if price_info.get("on_sale") else "",
+                "ingredient":     ingredient,
+                "total_quantity": display_qty,
+                "unit":           display_unit,
+                "best_store":     price_info.get("store", "—"),
+                "unit_price":     price_info.get("price_per_unit", ""),
+                "estimated_cost": estimated_cost,
+                "in_pantry":      "No",
+                "notes":          "ON SALE" if price_info.get("on_sale") else "",
             })
     return shopping
 

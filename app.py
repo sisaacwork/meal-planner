@@ -19,6 +19,7 @@ from meal_optimizer import (
     greedy_meal_plan, build_shopping_list,
 )
 from flipp_client import TORONTO_STORES, search_flipp, flipp_web_search_url
+from unit_converter import convert_to_metric, format_metric
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -381,24 +382,43 @@ elif page == "📅  Generate Meal Plan":
 
         with col_left:
             st.subheader("Settings")
-            num_meals   = st.slider("Dinners to plan", 2, min(7, len(recipes_df)), min(7, len(recipes_df)))
+            max_meals    = max(1, min(7, len(recipes_df)))  # never less than 1
+            default_meals = max_meals
+            num_meals    = st.slider("Dinners to plan", 1, max_meals, default_meals)
             generate_btn = st.button("✨ Generate Plan", type="primary", use_container_width=True)
 
         if generate_btn or "meal_plan" in st.session_state:
             if generate_btn:
-                ing_map      = build_ingredient_map(ing_df)
-                price_map    = build_price_map(prices_df)
-                recipe_ids   = list(recipes_df["recipe_id"].astype(str))
-                recipe_names = dict(zip(recipes_df["recipe_id"].astype(str), recipes_df["name"]))
-                selected_ids = greedy_meal_plan(recipe_ids, ing_map, num_meals)
-                shopping     = build_shopping_list(selected_ids, ing_map, price_map)
+                with st.spinner("Building your meal plan and saving to Google Sheets…"):
+                    try:
+                        ing_map      = build_ingredient_map(ing_df)
+                        price_map    = build_price_map(prices_df)
+                        recipe_ids   = list(recipes_df["recipe_id"].astype(str))
+                        recipe_names = dict(zip(recipes_df["recipe_id"].astype(str), recipes_df["name"]))
+                        selected_ids = greedy_meal_plan(recipe_ids, ing_map, num_meals)
+                        shopping     = build_shopping_list(selected_ids, ing_map, price_map)
 
-                st.session_state["meal_plan"] = {
-                    "selected_ids": selected_ids,
-                    "recipe_names": recipe_names,
-                    "shopping":     shopping,
-                    "ing_map":      ing_map,
-                }
+                        st.session_state["meal_plan"] = {
+                            "selected_ids": selected_ids,
+                            "recipe_names": recipe_names,
+                            "shopping":     shopping,
+                            "ing_map":      ing_map,
+                        }
+
+                        # Auto-save to Google Sheets so Shopping List tab updates immediately
+                        ss = get_ss()
+                        from meal_optimizer import write_plan_to_sheets
+                        write_plan_to_sheets(ss, selected_ids, recipe_names, ing_map, price_map)
+                        # Clear cached data and shopping list checkbox state
+                        load_all_data.clear()
+                        st.session_state.pop("shopping_checked", None)
+                        st.success("✅ Plan saved! Head to **🛒 Shopping List** to see your list.")
+                    except Exception as e:
+                        st.error(f"Could not generate plan: {e}")
+                        st.stop()
+
+            if "meal_plan" not in st.session_state:
+                st.stop()
 
             plan         = st.session_state["meal_plan"]
             selected_ids = plan["selected_ids"]
@@ -423,27 +443,14 @@ elif page == "📅  Generate Meal Plan":
             score  = len(shared) / len(ingredient_counts) if ingredient_counts else 0
 
             m1, m2, m3 = st.columns(3)
-            m1.metric("Ingredient overlap",    f"{score:.0%}")
-            m2.metric("Shared ingredients",    len(shared))
+            m1.metric("Ingredient overlap",      f"{score:.0%}")
+            m2.metric("Shared ingredients",      len(shared))
             m3.metric("Total unique ingredients", len(ingredient_counts))
 
             if shared:
                 with st.expander(f"🔗 {len(shared)} shared ingredients — buy these in bulk"):
                     for ing, recipes in sorted(shared.items()):
                         st.markdown(f"**{ing}** — used in: {', '.join(recipes)}")
-
-            st.markdown("---")
-            if st.button("💾 Save this plan to Google Sheets", use_container_width=True):
-                with st.spinner("Saving…"):
-                    try:
-                        ss        = get_ss()
-                        price_map = build_price_map(prices_df)
-                        from meal_optimizer import write_plan_to_sheets
-                        write_plan_to_sheets(ss, selected_ids, recipe_names, ing_map, price_map)
-                        load_all_data.clear()
-                        st.success("✅ Meal plan and shopping list saved to your Google Sheet!")
-                    except Exception as e:
-                        st.error(f"Could not save: {e}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -523,6 +530,23 @@ elif page == "🛒  Shopping List":
             filtered_df = shop_df[shop_df["Best Store"].isin(store_filter)]
         else:
             filtered_df = shop_df
+
+        # ── Metric toggle ─────────────────────────────────────────────────────
+        use_metric = st.toggle(
+            "🔄 Show quantities in metric",
+            value=True,
+            help="Converts cups/tbsp/tsp/lb/oz → ml/L/g/kg to match Canadian store labels",
+        )
+        if use_metric and "Qty" in filtered_df.columns and "Unit" in filtered_df.columns:
+            def to_metric_row(row):
+                try:
+                    qty, unit = convert_to_metric(float(row["Qty"]), str(row["Unit"]))
+                    row["Qty"]  = qty
+                    row["Unit"] = unit
+                except Exception:
+                    pass
+                return row
+            filtered_df = filtered_df.apply(to_metric_row, axis=1)
 
         # ── Editable table with checkboxes ────────────────────────────────────
         col_cfg = {}
