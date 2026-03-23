@@ -1,0 +1,10 @@
+# Meal Planner — Python Dependencies
+# Install with: pip install -r requirements.txt
+
+recipe-scrapers>=14.0.0   # Parses recipe pages from 300+ websites
+gspread>=6.0.0            # Reads/writes Google Sheets
+google-auth>=2.0.0        # Authenticates with Google APIs
+pandas>=2.0.0             # Data manipulation for the optimizer
+openpyxl>=3.1.0           # Used only if you regenerate the XLSX template
+streamlit>=1.35.0         # Web app interface — run with: streamlit run app.py
+requests>=2.31.0          # HTTP requests for recipe scraping
