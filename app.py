@@ -493,6 +493,13 @@ elif page == "📖  My Recipes":
                         edit_cols = [c for c in ["ingredient", "quantity", "unit", "recipe_name"] if c in recipe_ings.columns]
                         edit_df = recipe_ings[edit_cols].reset_index(drop=True)
 
+                        # gspread returns numeric-looking values (e.g. "6") as int,
+                        # not str. A mixed-type column confuses data_editor's text
+                        # cells — casting to str fixes the "can't type in the cell" bug.
+                        edit_df["ingredient"] = edit_df["ingredient"].astype(str)
+                        edit_df["unit"]       = edit_df["unit"].astype(str)
+                        edit_df["quantity"]   = pd.to_numeric(edit_df["quantity"], errors="coerce").fillna(0.0)
+
                         edited = st.data_editor(
                             edit_df,
                             num_rows="dynamic",
@@ -501,7 +508,8 @@ elif page == "📖  My Recipes":
                             key=f"ing_editor_{recipe_id}",
                             column_config={
                                 "ingredient": st.column_config.TextColumn(
-                                    "Ingredient", help="Edit the ingredient name"
+                                    "Ingredient",
+                                    help="Edit the ingredient name",
                                 ),
                                 "quantity": st.column_config.NumberColumn(
                                     "Qty", min_value=0, step=0.25, format="%.2f"
