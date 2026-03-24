@@ -96,6 +96,68 @@ def save_recipe_tags(ss, recipe_id: str, new_tags: str):
     raise ValueError(f"Recipe ID '{recipe_id}' not found.")
 
 
+def delete_recipe(ss, recipe_id: str):
+    """
+    Permanently delete a recipe and all its associated data from Google Sheets.
+    Removes the row from Recipes, all rows from Ingredients, and (if present)
+    the row from Ratings.
+    """
+    # ── Recipes sheet ────────────────────────────────────────────────────────
+    rec_ws     = ss.worksheet("Recipes")
+    rec_values = rec_ws.get_all_values()
+    if rec_values:
+        header   = [h.lower().strip() for h in rec_values[0]]
+        id_col   = header.index("recipe_id") if "recipe_id" in header else 0
+        for row_num, row in enumerate(rec_values[1:], start=2):
+            if row and str(row[id_col]).strip() == str(recipe_id).strip():
+                rec_ws.delete_rows(row_num)
+                break
+
+    # ── Ingredients sheet ────────────────────────────────────────────────────
+    ing_ws     = ss.worksheet("Ingredients")
+    ing_values = ing_ws.get_all_values()
+    rows_to_delete = [
+        i + 2
+        for i, row in enumerate(ing_values[1:])
+        if row and str(row[0]).strip() == str(recipe_id).strip()
+    ]
+    for row_num in sorted(rows_to_delete, reverse=True):
+        ing_ws.delete_rows(row_num)
+
+    # ── Ratings sheet (optional — skip if it doesn't exist) ──────────────────
+    try:
+        rat_ws     = ss.worksheet("Ratings")
+        rat_values = rat_ws.get_all_values()
+        if rat_values:
+            header   = [h.lower().strip() for h in rat_values[0]]
+            id_col   = header.index("recipe_id") if "recipe_id" in header else 0
+            for row_num, row in enumerate(rat_values[1:], start=2):
+                if row and str(row[id_col]).strip() == str(recipe_id).strip():
+                    rat_ws.delete_rows(row_num)
+                    break
+    except Exception:
+        pass  # Ratings sheet may not exist yet — that's fine
+
+
+def reset_meal_plan(ss):
+    """
+    Clear the Meal Plan and Shopping List tabs in Google Sheets, and wipe the
+    session-state keys that hold the in-memory plan.  Leaves header rows intact.
+    """
+    for tab_name in ("Meal Plan", "Shopping List"):
+        try:
+            ws   = ss.worksheet(tab_name)
+            rows = ws.get_all_values()
+            if len(rows) > 1:
+                ws.delete_rows(2, len(rows))
+        except Exception:
+            pass  # Tab doesn't exist yet — nothing to clear
+
+    # Wipe in-memory state so the Generate page shows the blank form again
+    st.session_state.pop("meal_plan", None)
+    st.session_state.pop("shopping_checked", None)
+
+
 def save_ingredient_edits(ss, recipe_id: str, edited_df: pd.DataFrame):
     """
     Replace all ingredient rows for a recipe in Google Sheets with the edited version.
@@ -536,6 +598,40 @@ elif page == "📖  My Recipes":
                                 except Exception as e:
                                     st.error(f"Could not save: {e}")
 
+                    # ── Delete recipe ─────────────────────────────────────────
+                    st.markdown("---")
+                    confirm_key = f"confirm_delete_{recipe_id}"
+                    if not st.session_state.get(confirm_key):
+                        if st.button(
+                            "🗑️ Delete this recipe",
+                            key=f"delete_btn_{recipe_id}",
+                            help="Permanently removes this recipe and its ingredients from Google Sheets.",
+                        ):
+                            st.session_state[confirm_key] = True
+                            st.rerun()
+                    else:
+                        st.warning(
+                            f"⚠️ Are you sure you want to permanently delete **{name}**? "
+                            "This cannot be undone."
+                        )
+                        d_yes, d_no = st.columns(2)
+                        with d_yes:
+                            if st.button("Yes, delete it", type="primary", key=f"delete_yes_{recipe_id}"):
+                                with st.spinner("Deleting…"):
+                                    try:
+                                        delete_recipe(get_ss(), recipe_id)
+                                        load_all_data.clear()
+                                        load_ratings.clear()
+                                        st.session_state.pop(confirm_key, None)
+                                        st.success(f"✅ **{name}** has been deleted.")
+                                        st.rerun()
+                                    except Exception as e:
+                                        st.error(f"Could not delete recipe: {e}")
+                        with d_no:
+                            if st.button("Cancel", key=f"delete_no_{recipe_id}"):
+                                st.session_state.pop(confirm_key, None)
+                                st.rerun()
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE 3 — GENERATE MEAL PLAN
@@ -562,6 +658,18 @@ elif page == "📅  Generate Meal Plan":
                 help="Set to $0 to skip budget checking. The optimizer will warn you if your estimated total exceeds this.",
             )
             generate_btn = st.button("✨ Generate Plan", type="primary", use_container_width=True)
+            reset_btn    = st.button("🗑️ Reset week", use_container_width=True,
+                                     help="Clears the current meal plan and shopping list from Google Sheets so you can start fresh.")
+
+        if reset_btn:
+            with st.spinner("Resetting…"):
+                try:
+                    reset_meal_plan(get_ss())
+                    load_all_data.clear()
+                    st.success("✅ Meal plan and shopping list cleared. Ready for a new week!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Could not reset: {e}")
 
         if generate_btn or "meal_plan" in st.session_state:
             if generate_btn:
