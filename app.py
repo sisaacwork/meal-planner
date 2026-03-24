@@ -1200,6 +1200,11 @@ INSTACART_COOKIE = "paste_the_long_cookie_string_here"
         try:
             store_prices_ws = get_ss().worksheet("Store Prices")
             store_prices_df = pd.DataFrame(store_prices_ws.get_all_records())
+            # gspread can return numeric-looking cells as int — cast text columns to str
+            for _col in ("ingredient", "store", "product_name", "qty_unit",
+                         "on_sale", "sale_ends", "scraped_date", "source"):
+                if _col in store_prices_df.columns:
+                    store_prices_df[_col] = store_prices_df[_col].astype(str)
         except Exception:
             store_prices_df = pd.DataFrame()
 

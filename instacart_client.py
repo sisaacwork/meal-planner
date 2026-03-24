@@ -31,7 +31,7 @@ How to verify/update retailer slugs:
 """
 
 import requests
-from flipp_client import _is_relevant_result
+from price_filter import is_relevant_result
 
 # ── Endpoint ──────────────────────────────────────────────────────────────────
 _SEARCH_URL = "https://www.instacart.ca/v3/retailers/{slug}/product_search"
@@ -173,7 +173,7 @@ def search_instacart(
                     continue
 
                 # Apply the same relevance filter used by the Flipp client
-                if not _is_relevant_result(ingredient, name):
+                if not is_relevant_result(ingredient, name):
                     continue
 
                 results.append({
