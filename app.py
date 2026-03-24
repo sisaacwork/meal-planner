@@ -61,6 +61,101 @@ def get_credentials_path():
     return getattr(config, "CREDENTIALS_PATH", "credentials.json") if config else "credentials.json"
 
 
+def sync_store_prices_to_tracker(ss) -> int:
+    """
+    After an auto-fetch, copy the best price per (ingredient, store) from the
+    'Store Prices' sheet into the 'Price Tracker' sheet so the optimizer and
+    the 'Current Prices' tab can use them.
+
+    Logic:
+    - Rows in Price Tracker whose notes column contains "auto-fetched" are
+      considered managed by this function and will be replaced on each run.
+    - Rows entered manually (any other notes value) are never touched.
+
+    Returns the number of rows written.
+    """
+    try:
+        # ── Load Store Prices (the fresh auto-fetch results) ──────────────────
+        sp_ws  = ss.worksheet("Store Prices")
+        sp_df  = pd.DataFrame(sp_ws.get_all_records())
+        if sp_df.empty:
+            return 0
+
+        # Coerce price column; drop rows with no price
+        sp_df["price"] = pd.to_numeric(sp_df.get("price", pd.Series()), errors="coerce")
+        sp_df = sp_df.dropna(subset=["price"])
+        if sp_df.empty:
+            return 0
+
+        # Keep the cheapest price per (ingredient, store)
+        best_df = sp_df.loc[sp_df.groupby(["ingredient", "store"])["price"].idxmin()].copy()
+
+        # ── Load Price Tracker and strip old auto-fetched rows ────────────────
+        pt_ws   = ss.worksheet("Price Tracker")
+        pt_vals = pt_ws.get_all_values()
+
+        if pt_vals:
+            header   = pt_vals[0]
+            pt_rows  = pt_vals[1:]
+        else:
+            header   = ["ingredient", "store", "brand_size", "price",
+                        "qty_amount", "qty_unit", "price_per_unit",
+                        "on_sale", "sale_ends", "notes"]
+            pt_rows  = []
+
+        # Figure out which column is "notes" (last column by default)
+        notes_idx = header.index("notes") if "notes" in header else len(header) - 1
+
+        # Keep only manual rows (anything whose notes cell doesn't say auto-fetched)
+        manual_rows = [
+            r for r in pt_rows
+            if "auto-fetched" not in str(r[notes_idx] if notes_idx < len(r) else "").lower()
+        ]
+
+        # ── Build the new auto-fetched rows to append ─────────────────────────
+        new_rows = []
+        for _, row in best_df.iterrows():
+            ing    = str(row.get("ingredient", "")).strip().lower()
+            store  = str(row.get("store", "")).strip()
+            price  = row.get("price", "")
+            qty_a  = row.get("qty_amount", 1)
+            qty_u  = str(row.get("qty_unit", "whole")).strip()
+            ppu    = row.get("price_per_unit", price)
+            on_sale = str(row.get("on_sale", "No")).strip()
+            sale_ends = str(row.get("sale_ends", "")).strip()
+            source    = str(row.get("source", "")).strip()
+            prod_name = str(row.get("product_name", "")).strip()
+
+            if not ing or not store:
+                continue
+
+            new_rows.append([
+                ing,
+                store,
+                prod_name,          # brand_size
+                round(float(price), 2) if price else "",
+                qty_a,
+                qty_u,
+                round(float(ppu), 4) if ppu else "",
+                on_sale,
+                sale_ends,
+                f"auto-fetched ({source})",
+            ])
+
+        if not new_rows:
+            return 0
+
+        # ── Write: header + manual rows + fresh auto-fetched rows ─────────────
+        all_rows = [header] + manual_rows + new_rows
+        pt_ws.clear()
+        pt_ws.update("A1", all_rows)
+        return len(new_rows)
+
+    except Exception as e:
+        print(f"[sync_store_prices_to_tracker] {e}")
+        return 0
+
+
 # ── Google Sheets connection ──────────────────────────────────────────────────
 @st.cache_resource(show_spinner="Connecting to Google Sheets…")
 def get_sheets_connection():
@@ -1185,6 +1280,22 @@ INSTACART_COOKIE = "paste_the_long_cookie_string_here"
                     if rows_written:
                         parts = [f"**{v}** from {k}" for k, v in source_counts.items() if v > 0]
                         st.success(f"✅ Saved **{rows_written}** price entries — {', '.join(parts)}.")
+
+                        # Warn specifically if Instacart was enabled but returned nothing
+                        if instacart_enabled and source_counts.get("Instacart", 0) == 0:
+                            st.warning(
+                                "⚠️ Instacart returned 0 results even though a cookie is configured. "
+                                "The cookie may have expired — log out of instacart.ca, log back in, "
+                                "and copy a fresh cookie from DevTools."
+                            )
+
+                        # Sync fetched prices into Price Tracker so they show up
+                        # in 'Current Prices' and can be used by the meal optimizer
+                        synced = sync_store_prices_to_tracker(get_ss())
+                        if synced:
+                            st.info(f"🔄 {synced} prices synced to your Price Tracker.")
+                        load_all_data.clear()
+
                     if errors:
                         with st.expander(f"⚠️ {len(errors)} warning(s)"):
                             for err in errors:

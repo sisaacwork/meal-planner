@@ -60,7 +60,7 @@ _HEADERS_BASE = {
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/124.0.0.0 Safari/537.36"
     ),
-    "Referer":          "https://www.instacart.ca/store/",
+    # Referer is set per-store in the request loop (see below)
     "X-Requested-With": "XMLHttpRequest",
 }
 
@@ -100,7 +100,6 @@ def search_instacart(
         return []
 
     retailer_map = stores if stores is not None else INSTACART_RETAILERS
-    headers = {**_HEADERS_BASE, "Cookie": cookie.strip()}
     results = []
     cookie_expired = False
 
@@ -109,11 +108,21 @@ def search_instacart(
             break  # no point hammering the API once we know auth is dead
 
         url = _SEARCH_URL.format(slug=slug)
+
+        # Instacart's internal API uses "term" as the search query key.
+        # "source" and "per_page" are standard pagination params.
         params = {
-            "query":    ingredient,
+            "term":     ingredient,
             "source":   "search",
             "per_page": 20,   # fetch more so relevance filter has material to work with
             "page":     1,
+        }
+
+        # Use a per-store Referer so the request looks like a real browser
+        headers = {
+            **_HEADERS_BASE,
+            "Cookie":  cookie.strip(),
+            "Referer": f"https://www.instacart.ca/store/{slug}/storefront",
         }
 
         try:
