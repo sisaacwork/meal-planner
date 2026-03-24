@@ -1205,6 +1205,14 @@ INSTACART_COOKIE = "paste_the_long_cookie_string_here"
                          "on_sale", "sale_ends", "scraped_date", "source"):
                 if _col in store_prices_df.columns:
                     store_prices_df[_col] = store_prices_df[_col].astype(str)
+            # Numeric columns may contain empty strings (e.g. Flipp rows with no
+            # price) — pd.to_numeric with errors='coerce' turns them into NaN
+            # instead of raising ArrowInvalid when Streamlit serialises the df.
+            for _col in ("price", "qty_amount", "price_per_unit"):
+                if _col in store_prices_df.columns:
+                    store_prices_df[_col] = pd.to_numeric(
+                        store_prices_df[_col], errors="coerce"
+                    )
         except Exception:
             store_prices_df = pd.DataFrame()
 

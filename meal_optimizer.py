@@ -53,9 +53,12 @@ def load_data(ss):
         sys.exit(1)
 
     # Normalize column names (lowercase, strip spaces)
-    recipes_df.columns = recipes_df.columns.str.lower().str.strip()
-    ing_df.columns = ing_df.columns.str.lower().str.strip()
-    prices_df.columns = prices_df.columns.str.lower().str.strip()
+    # Use a list comprehension instead of .str accessor — gspread sometimes
+    # returns integer column indices (when the sheet is empty or has no header)
+    # which cause "Can only use .str accessor with string values" errors.
+    recipes_df.columns = [str(c).lower().strip() for c in recipes_df.columns]
+    ing_df.columns     = [str(c).lower().strip() for c in ing_df.columns]
+    prices_df.columns  = [str(c).lower().strip() for c in prices_df.columns]
 
     return recipes_df, ing_df, prices_df
 
