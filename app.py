@@ -51,6 +51,12 @@ def get_postal_code():
     return getattr(config, "POSTAL_CODE", "M5V3A8") if config else "M5V3A8"
 
 
+def get_instacart_cookie() -> str:
+    if "INSTACART_COOKIE" in st.secrets:
+        return st.secrets["INSTACART_COOKIE"]
+    return getattr(config, "INSTACART_COOKIE", "") if config else ""
+
+
 def get_credentials_path():
     return getattr(config, "CREDENTIALS_PATH", "credentials.json") if config else "credentials.json"
 
@@ -966,6 +972,32 @@ elif page == "💰  Price Tracker":
 
             st.dataframe(prices_df, use_container_width=True, hide_index=True)
 
+            st.markdown("---")
+            if not st.session_state.get("confirm_clear_prices"):
+                if st.button("🗑️ Clear all saved prices", help="Removes every row from the Price Tracker sheet so you can start fresh."):
+                    st.session_state["confirm_clear_prices"] = True
+                    st.rerun()
+            else:
+                st.warning("⚠️ This will permanently delete **all** saved prices from Google Sheets. Are you sure?")
+                cp_yes, cp_no = st.columns(2)
+                with cp_yes:
+                    if st.button("Yes, clear prices", type="primary", key="confirm_clear_prices_yes"):
+                        try:
+                            pw = get_ss().worksheet("Price Tracker")
+                            all_vals = pw.get_all_values()
+                            if len(all_vals) > 1:
+                                pw.delete_rows(2, len(all_vals))
+                            load_all_data.clear()
+                            st.session_state.pop("confirm_clear_prices", None)
+                            st.success("✅ Price Tracker cleared.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Could not clear prices: {e}")
+                with cp_no:
+                    if st.button("Cancel", key="confirm_clear_prices_no"):
+                        st.session_state.pop("confirm_clear_prices", None)
+                        st.rerun()
+
     # ── Tab 2: Add / update a price ───────────────────────────────────────────
     with tab_add:
         st.markdown("Fill in the details below to add or update a price in your tracker.")
@@ -1095,20 +1127,64 @@ elif page == "💰  Price Tracker":
 
     # ── Tab 4: Auto-fetch store prices ────────────────────────────────────────
     with tab_auto:
+        from instacart_client import cookie_looks_configured, INSTACART_RETAILERS
+
+        instacart_cookie  = get_instacart_cookie()
+        instacart_enabled = cookie_looks_configured(instacart_cookie)
+
         st.markdown(
-            "Automatically search **Flipp** (flyer deals) and **Loblaws / No Frills** (regular shelf prices) "
-            "for every ingredient on your current shopping list. Results are saved to the **Store Prices** tab "
-            "in your Google Sheet. Run this once a week after generating your meal plan."
+            "Automatically search **Instacart** (Farm Boy, Longo's, Metro, Sobeys & more), "
+            "**Flipp** (flyer deals), and **Loblaws / No Frills** (PC Express) "
+            "for every ingredient on your shopping list. "
+            "Results are saved to the **Store Prices** tab. Run once a week after generating your meal plan."
         )
-        st.info("💡 You need to have generated a meal plan first — the scraper reads your Shopping List tab for ingredient names.")
+        st.info("💡 Generate a meal plan first — the scraper reads your Shopping List tab for ingredient names.")
+
+        # ── Instacart setup instructions (shown when cookie not yet configured) ──
+        if not instacart_enabled:
+            with st.expander("🔑 Set up Instacart (recommended — covers Farm Boy, Longo's, Metro, Sobeys & more)"):
+                st.markdown("""
+Instacart has real-time shelf prices for stores that don't publish their own API.
+To enable it, you need to copy a session cookie from your browser once.
+The cookie stays valid for **2–4 weeks**, then you repeat these steps.
+
+**Steps:**
+1. Log in to [instacart.ca](https://www.instacart.ca) in Chrome or Firefox.
+2. Open **DevTools** (press `F12` or right-click → Inspect).
+3. Go to the **Network** tab, then search for any grocery item on Instacart.
+4. In the Network tab, click on a request to `instacart.ca` (look for one named **product_search**).
+5. Under **Request Headers**, find the line that starts with **`Cookie:`** — copy the full value (it will be very long).
+6. Add it to your `config.py`:
+```python
+INSTACART_COOKIE = "paste_the_long_cookie_string_here"
+```
+Or add it to your Streamlit secrets file:
+```toml
+INSTACART_COOKIE = "paste_the_long_cookie_string_here"
+```
+7. Restart the app and this notice will disappear.
+
+**Stores covered:** """ + ", ".join(INSTACART_RETAILERS.keys()))
+        else:
+            st.success(f"✅ Instacart connected — covering {len(INSTACART_RETAILERS)} stores: {', '.join(INSTACART_RETAILERS.keys())}")
+
+        st.markdown("---")
 
         if st.button("🔄 Fetch prices for all shopping list items", type="primary"):
             from store_scraper import refresh_store_prices
-            with st.spinner("Searching Flipp and Loblaws/No Frills — this takes about 30–60 seconds…"):
+            spinner_msg = (
+                "Searching Instacart, Flipp, and Loblaws/No Frills — this takes about 60–90 seconds…"
+                if instacart_enabled
+                else "Searching Flipp and Loblaws/No Frills — this takes about 30–60 seconds…"
+            )
+            with st.spinner(spinner_msg):
                 try:
-                    rows_written, errors = refresh_store_prices(get_ss(), postal_code)
+                    rows_written, errors, source_counts = refresh_store_prices(
+                        get_ss(), postal_code, instacart_cookie
+                    )
                     if rows_written:
-                        st.success(f"✅ Done! Saved **{rows_written}** price entries to the Store Prices tab.")
+                        parts = [f"**{v}** from {k}" for k, v in source_counts.items() if v > 0]
+                        st.success(f"✅ Saved **{rows_written}** price entries — {', '.join(parts)}.")
                     if errors:
                         with st.expander(f"⚠️ {len(errors)} warning(s)"):
                             for err in errors:
@@ -1151,6 +1227,31 @@ elif page == "💰  Price Tracker":
                         store_prices_df = store_prices_df[store_prices_df["source"].isin(src_filter)]
 
             st.dataframe(store_prices_df, use_container_width=True, hide_index=True)
+
+            st.markdown("---")
+            if not st.session_state.get("confirm_clear_store_prices"):
+                if st.button("🗑️ Clear store prices", help="Removes all rows from the Store Prices sheet. Useful before a fresh weekly fetch."):
+                    st.session_state["confirm_clear_store_prices"] = True
+                    st.rerun()
+            else:
+                st.warning("⚠️ This will permanently delete all auto-fetched store prices. Are you sure?")
+                sp_yes, sp_no = st.columns(2)
+                with sp_yes:
+                    if st.button("Yes, clear store prices", type="primary", key="confirm_clear_store_prices_yes"):
+                        try:
+                            spw = get_ss().worksheet("Store Prices")
+                            all_vals = spw.get_all_values()
+                            if len(all_vals) > 1:
+                                spw.delete_rows(2, len(all_vals))
+                            st.session_state.pop("confirm_clear_store_prices", None)
+                            st.success("✅ Store Prices cleared. Hit the fetch button above to pull fresh data.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Could not clear store prices: {e}")
+                with sp_no:
+                    if st.button("Cancel", key="confirm_clear_store_prices_no"):
+                        st.session_state.pop("confirm_clear_store_prices", None)
+                        st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════════════════

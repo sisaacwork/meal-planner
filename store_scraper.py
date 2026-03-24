@@ -1,23 +1,28 @@
 """
 store_scraper.py
 ----------------
-Fetches prices from two sources and writes results to the 'Store Prices' tab
+Fetches prices from three sources and writes results to the 'Store Prices' tab
 in your Google Sheet.
 
-Sources
--------
-1. Flipp (flyer deals)   — already powers the Price Tracker search tab.
-                           Here we bulk-search every shopping list ingredient
-                           at once and save the top deals automatically.
+Sources (in priority order)
+----------------------------
+1. Instacart          — real-time shelf prices from Farm Boy, Longo's, Metro,
+                         Sobeys, FreshCo, Costco, Whole Foods, T&T, and more.
+                         Requires a session cookie (see instacart_client.py).
+                         Best source: covers the stores that don't have their own
+                         public API.
 
-2. PC Express API        — the same API that powers Loblaws.ca and NoFrills.ca.
-                           Returns regular (non-sale) shelf prices so you always
-                           have a baseline, even when nothing is on flyer.
-                           Note: if Loblaws ever changes their API, this part will
-                           fail silently — Flipp results are still written.
+2. Flipp              — weekly flyer deals aggregated from most major chains.
+                         No authentication needed.  Great for catching sales you
+                         might otherwise miss.
 
-Call refresh_store_prices(ss, postal_code) from the app to trigger a refresh.
-Results land in the 'Store Prices' tab (old data is replaced each run).
+3. PC Express         — regular (non-sale) shelf prices for Loblaws and No Frills
+                         via the same API that powers their websites.
+                         Requires no authentication but the API key embedded in
+                         their JS may rotate; fails gracefully if it does.
+
+Call refresh_store_prices(ss, postal_code, instacart_cookie) from app.py.
+Results land in the 'Store Prices' tab (full refresh each run).
 """
 
 import uuid
@@ -25,20 +30,17 @@ import requests
 from datetime import date
 
 from flipp_client import search_flipp
+from instacart_client import search_instacart, cookie_looks_configured
 
 
 # ── PC Express API (powers Loblaws.ca / NoFrills.ca) ─────────────────────────
-# The API key below is embedded in the public Loblaws.ca website JavaScript —
-# it is not a secret.  If Loblaws rotates the key, PC Express lookups will
-# fail gracefully and Flipp results will still be saved.
-
 PC_EXPRESS_URL = "https://api.pcexpress.ca/product-facade/v4/products/search"
 PC_EXPRESS_KEY = "1im1hL52q9xvta16GlSdYDsTvxmPkNpNPLYkgzQd"
 
 # banner → store_id pairs for a Toronto location of each chain
 PC_BANNERS = {
-    "Loblaws":   ("loblaws",   "1009"),
-    "No Frills": ("nofrills",  "3406"),
+    "Loblaws":   ("loblaws",  "1009"),
+    "No Frills": ("nofrills", "3406"),
 }
 
 STORE_PRICES_HEADERS = [
@@ -48,7 +50,7 @@ STORE_PRICES_HEADERS = [
 ]
 
 
-# ── Internal helpers ──────────────────────────────────────────────────────────
+# ── PC Express helper ─────────────────────────────────────────────────────────
 
 def _pc_express_search(ingredient: str, banner: str, store_id: str, max_results: int = 2):
     """
@@ -57,13 +59,13 @@ def _pc_express_search(ingredient: str, banner: str, store_id: str, max_results:
     Returns [] on any error so a single failure doesn't stop the whole run.
     """
     headers = {
-        "Accept":                    "application/json, text/plain, */*",
-        "Content-Type":              "application/json",
-        "x-apikey":                  PC_EXPRESS_KEY,
-        "x-app-user-transfer-id":    str(uuid.uuid4()),
-        "x-application-type":        "Web",
-        "x-channel-id":              "Web",
-        "Site-Banner":               banner,
+        "Accept":                 "application/json, text/plain, */*",
+        "Content-Type":           "application/json",
+        "x-apikey":               PC_EXPRESS_KEY,
+        "x-app-user-transfer-id": str(uuid.uuid4()),
+        "x-application-type":     "Web",
+        "x-channel-id":           "Web",
+        "Site-Banner":            banner,
         "x-site-context": (
             f'{{"storeId":"{store_id}","bannerId":"","businessUnitId":"","action":""}}'
         ),
@@ -76,9 +78,9 @@ def _pc_express_search(ingredient: str, banner: str, store_id: str, max_results:
         "Referer": "https://www.loblaws.ca/",
     }
     body = {
-        "from": 0,
-        "size": max_results,
-        "query": ingredient,
+        "from":    0,
+        "size":    max_results,
+        "query":   ingredient,
         "filters": {"categories": []},
     }
     try:
@@ -94,10 +96,11 @@ def _pc_express_search(ingredient: str, banner: str, store_id: str, max_results:
                 out.append({"name": name, "price": float(price), "size": size})
         return out
     except Exception as exc:
-        # Fail silently — PC Express is a bonus, not critical
         print(f"    [PC Express] {banner}/{ingredient}: {exc}")
         return []
 
+
+# ── Sheet helper ──────────────────────────────────────────────────────────────
 
 def _ensure_store_prices_tab(ss):
     """Return the 'Store Prices' worksheet, creating it if it doesn't exist."""
@@ -108,31 +111,42 @@ def _ensure_store_prices_tab(ss):
     return ws
 
 
-# ── Public function called from app.py ───────────────────────────────────────
+# ── Public entry point ────────────────────────────────────────────────────────
 
-def refresh_store_prices(ss, postal_code: str = "M5V3A8"):
+def refresh_store_prices(
+    ss,
+    postal_code: str = "M5V3A8",
+    instacart_cookie: str = "",
+):
     """
-    Reads the current 'Shopping List' tab for ingredients, then:
-      1. Bulk-searches Flipp for flyer deals on every ingredient.
-      2. Searches PC Express (Loblaws + No Frills) for regular shelf prices.
-      3. Writes all results to the 'Store Prices' tab (full refresh).
+    Read the current Shopping List tab for ingredients, then search all three
+    price sources in priority order and write results to the Store Prices tab.
+
+    Parameters
+    ----------
+    ss                 : gspread Spreadsheet object
+    postal_code        : used by Flipp to find local flyer deals
+    instacart_cookie   : browser session cookie for Instacart (optional but recommended)
 
     Returns
     -------
-    rows_written : int
-    errors       : list[str]   — non-fatal messages, shown to the user
+    (rows_written, errors, source_counts)
+      rows_written  : total rows saved
+      errors        : list of non-fatal warning strings to show the user
+      source_counts : dict of {source_name: row_count} for the summary banner
     """
     errors = []
+    source_counts: dict = {"Instacart": 0, "Flipp": 0, "PC Express": 0}
 
     # ── Load shopping list ingredients ────────────────────────────────────────
     try:
         shop_ws   = ss.worksheet("Shopping List")
         shop_data = shop_ws.get_all_records()
     except Exception as e:
-        return 0, [f"Could not read Shopping List tab: {e}"]
+        return 0, [f"Could not read Shopping List tab: {e}"], source_counts
 
     if not shop_data:
-        return 0, ["Shopping list is empty — generate a meal plan first."]
+        return 0, ["Shopping list is empty — generate a meal plan first."], source_counts
 
     # Deduplicate while preserving order
     seen: set = set()
@@ -144,17 +158,46 @@ def refresh_store_prices(ss, postal_code: str = "M5V3A8"):
             seen.add(ing)
 
     if not ingredients:
-        return 0, ["No ingredients found in your shopping list."]
+        return 0, ["No ingredients found in your shopping list."], source_counts
 
     today = date.today().isoformat()
     rows: list = []
 
-    # ── 1. Flipp bulk search ──────────────────────────────────────────────────
+    # ── Source 1: Instacart ───────────────────────────────────────────────────
+    use_instacart = cookie_looks_configured(instacart_cookie)
+    if use_instacart:
+        print(f"[store_scraper] Searching Instacart for {len(ingredients)} ingredients…")
+        for ing in ingredients:
+            products = search_instacart(ing, instacart_cookie, max_per_store=2)
+            for prod in products:
+                price = prod["price"]
+                rows.append([
+                    ing,
+                    prod["store"],
+                    prod["name"] + (f" ({prod['size']})" if prod.get("size") else ""),
+                    price,
+                    1,
+                    "whole",
+                    round(price, 4),
+                    "No",    # real-time shelf price, not necessarily a sale
+                    "",
+                    today,
+                    "Instacart",
+                ])
+                source_counts["Instacart"] += 1
+    else:
+        print("[store_scraper] Instacart cookie not configured — skipping.")
+        errors.append(
+            "Instacart not searched: no cookie configured.  "
+            "See the setup instructions in the Auto-fetch tab to add one."
+        )
+
+    # ── Source 2: Flipp ───────────────────────────────────────────────────────
     print(f"[store_scraper] Searching Flipp for {len(ingredients)} ingredients…")
     for ing in ingredients:
         try:
             deals = search_flipp(ing, postal_code)
-            for deal in deals[:3]:               # keep top 3 deals per ingredient
+            for deal in deals[:3]:          # keep top 3 deals per ingredient
                 price = deal.get("price")
                 ppu   = round(float(price), 4) if price else ""
                 rows.append([
@@ -165,15 +208,16 @@ def refresh_store_prices(ss, postal_code: str = "M5V3A8"):
                     1,
                     "whole",
                     ppu,
-                    "Yes",                        # these ARE flyer/sale prices
+                    "Yes",                  # Flipp results are always flyer/sale prices
                     deal.get("valid_until", ""),
                     today,
                     "Flipp",
                 ])
+                source_counts["Flipp"] += 1
         except Exception as e:
             errors.append(f"Flipp / {ing}: {e}")
 
-    # ── 2. PC Express (Loblaws + No Frills) ──────────────────────────────────
+    # ── Source 3: PC Express (Loblaws + No Frills) ────────────────────────────
     print(f"[store_scraper] Checking PC Express for {len(ingredients)} ingredients…")
     for ing in ingredients:
         for store_name, (banner, store_id) in PC_BANNERS.items():
@@ -182,26 +226,26 @@ def refresh_store_prices(ss, postal_code: str = "M5V3A8"):
                 rows.append([
                     ing,
                     store_name,
-                    f"{prod['name']}" + (f" ({prod['size']})" if prod["size"] else ""),
+                    prod["name"] + (f" ({prod['size']})" if prod.get("size") else ""),
                     prod["price"],
                     1,
                     "whole",
-                    round(prod["price"], 4),      # price per unit (qty = 1 pkg)
-                    "No",                          # regular shelf price, not a sale
+                    round(prod["price"], 4),
+                    "No",
                     "",
                     today,
                     "PC Express",
                 ])
+                source_counts["PC Express"] += 1
 
-    # ── 3. Write to Store Prices tab ─────────────────────────────────────────
+    # ── Write to Store Prices tab ─────────────────────────────────────────────
     try:
         ws = _ensure_store_prices_tab(ss)
         ws.clear()
-        all_rows = [STORE_PRICES_HEADERS] + rows
-        ws.update(f"A1", all_rows)
+        ws.update("A1", [STORE_PRICES_HEADERS] + rows)
         print(f"[store_scraper] Wrote {len(rows)} rows to Store Prices tab.")
     except Exception as e:
         errors.append(f"Could not write Store Prices tab: {e}")
-        return 0, errors
+        return 0, errors, source_counts
 
-    return len(rows), errors
+    return len(rows), errors, source_counts

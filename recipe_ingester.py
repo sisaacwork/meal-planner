@@ -21,14 +21,41 @@ Supported sites: AllRecipes, NYT Cooking, Serious Eats, BBC Good Food,
   For unsupported sites, wild_mode=True makes a best-effort attempt.
 """
 
+import re
 import sys
 import uuid
 from datetime import date
 
 import requests
 from recipe_scrapers import scrape_html
-from ingredient_parser import parse_ingredient
+from ingredient_parser import split_and_parse
 from sheets_client import get_client, get_spreadsheet
+
+def _merge_orphan_numbers(lines: list) -> list:
+    """
+    Some recipe scrapers split a line like "6-8 bone-in chicken thighs" into
+    two separate items: ["6-8", "bone-in chicken thighs"].  This function
+    detects those orphaned number/range lines and glues them back onto the
+    next line so the parser sees the complete ingredient string.
+    """
+    merged = []
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        # A line is "orphaned" if it contains ONLY digits, fractions, unicode
+        # fraction characters, or a numeric range — with no alphabetic content.
+        is_orphan = bool(
+            line
+            and re.fullmatch(r"[\d½⅓⅔¼¾⅛⅜⅝⅞/.\s]+(?:[-–][\d]+)?", line)
+        )
+        if is_orphan and i + 1 < len(lines):
+            merged.append(line + " " + lines[i + 1].strip())
+            i += 2  # skip the next line — it's been merged
+        else:
+            merged.append(line)
+            i += 1
+    return merged
+
 
 # Pretend to be a regular browser so sites don't block us
 HEADERS = {
@@ -88,14 +115,15 @@ def ingest_recipe(
 
     # ── Parse each ingredient ────────────────────────────────────────────────
     raw_ingredients = scraper.ingredients()
+    raw_ingredients = _merge_orphan_numbers(raw_ingredients)
     print(f"   Parsing {len(raw_ingredients)} ingredients...")
 
     ingredients = []
     for raw in raw_ingredients:
-        parsed = parse_ingredient(raw)
-        parsed["recipe_id"] = recipe_id
-        parsed["recipe_name"] = recipe["name"]
-        ingredients.append(parsed)
+        for parsed in split_and_parse(raw):
+            parsed["recipe_id"] = recipe_id
+            parsed["recipe_name"] = recipe["name"]
+            ingredients.append(parsed)
 
     # ── Connect to Google Sheets ─────────────────────────────────────────────
     print("   Connecting to Google Sheets...")
@@ -180,12 +208,13 @@ def ingest_manual(
     }
 
     lines = [line.strip() for line in raw_ingredients_text.splitlines() if line.strip()]
+    lines = _merge_orphan_numbers(lines)
     ingredients = []
     for raw in lines:
-        parsed = parse_ingredient(raw)
-        parsed["recipe_id"] = recipe_id
-        parsed["recipe_name"] = recipe["name"]
-        ingredients.append(parsed)
+        for parsed in split_and_parse(raw):
+            parsed["recipe_id"] = recipe_id
+            parsed["recipe_name"] = recipe["name"]
+            ingredients.append(parsed)
 
     gc = get_client(credentials_path)
     ss = get_spreadsheet(gc, spreadsheet_id)
