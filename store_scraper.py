@@ -57,7 +57,7 @@ def _pc_express_search(ingredient: str, banner: str, store_id: str, max_results:
     Returns [] on any error so a single failure doesn't stop the whole run.
     """
     headers = {
-        "Accept":                    "application/json",
+        "Accept":                    "application/json, text/plain, */*",
         "Content-Type":              "application/json",
         "x-apikey":                  PC_EXPRESS_KEY,
         "x-app-user-transfer-id":    str(uuid.uuid4()),
@@ -67,6 +67,13 @@ def _pc_express_search(ingredient: str, banner: str, store_id: str, max_results:
         "x-site-context": (
             f'{{"storeId":"{store_id}","bannerId":"","businessUnitId":"","action":""}}'
         ),
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Origin":  "https://www.loblaws.ca",
+        "Referer": "https://www.loblaws.ca/",
     }
     body = {
         "from": 0,

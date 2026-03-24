@@ -1028,7 +1028,7 @@ elif page == "💰  Price Tracker":
                 if "ingredient" in store_prices_df.columns:
                     ing_filter = st.multiselect(
                         "Filter by ingredient",
-                        options=sorted(store_prices_df["ingredient"].dropna().unique()),
+                        options=sorted(store_prices_df["ingredient"].dropna().astype(str).unique()),
                     )
                     if ing_filter:
                         store_prices_df = store_prices_df[store_prices_df["ingredient"].isin(ing_filter)]
@@ -1036,8 +1036,8 @@ elif page == "💰  Price Tracker":
                 if "source" in store_prices_df.columns:
                     src_filter = st.multiselect(
                         "Filter by source",
-                        options=sorted(store_prices_df["source"].dropna().unique()),
-                        default=list(store_prices_df["source"].dropna().unique()),
+                        options=sorted(store_prices_df["source"].dropna().astype(str).unique()),
+                        default=list(store_prices_df["source"].dropna().astype(str).unique()),
                     )
                     if src_filter:
                         store_prices_df = store_prices_df[store_prices_df["source"].isin(src_filter)]
